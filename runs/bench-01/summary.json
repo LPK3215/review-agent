@@ -1,0 +1,106 @@
+{
+ "single/exact": {
+  "n": 30,
+  "judge_mean": 1.7,
+  "judge_n": 30,
+  "tokens_mean": 25706.3,
+  "calls_mean": 4.3,
+  "lat_mean_ms": 10471.8,
+  "lat_p50_ms": 9823.8
+ },
+ "single/semantic": {
+  "n": 20,
+  "judge_mean": 1.9,
+  "judge_n": 20,
+  "tokens_mean": 25994.0,
+  "calls_mean": 4.2,
+  "lat_mean_ms": 12097.3,
+  "lat_p50_ms": 12291.5
+ },
+ "single/all": {
+  "n": 50,
+  "judge_mean": 1.78,
+  "judge_n": 50,
+  "tokens_mean": 25821.4,
+  "calls_mean": 4.26,
+  "lat_mean_ms": 11122.0,
+  "lat_p50_ms": 11668.6
+ },
+ "selfcheck/exact": {
+  "n": 30,
+  "judge_mean": 1.667,
+  "judge_n": 30,
+  "tokens_mean": 44583.3,
+  "calls_mean": 6.23,
+  "lat_mean_ms": 15809.5,
+  "lat_p50_ms": 14765.2
+ },
+ "selfcheck/semantic": {
+  "n": 20,
+  "judge_mean": 1.95,
+  "judge_n": 20,
+  "tokens_mean": 46461.8,
+  "calls_mean": 5.95,
+  "lat_mean_ms": 20038.3,
+  "lat_p50_ms": 20686.5
+ },
+ "selfcheck/all": {
+  "n": 50,
+  "judge_mean": 1.78,
+  "judge_n": 50,
+  "tokens_mean": 45334.7,
+  "calls_mean": 6.12,
+  "lat_mean_ms": 17501.0,
+  "lat_p50_ms": 17752.1
+ },
+ "review/exact": {
+  "n": 30,
+  "judge_mean": 1.767,
+  "judge_n": 30,
+  "tokens_mean": 95140.2,
+  "calls_mean": 12.77,
+  "lat_mean_ms": 29870.4,
+  "lat_p50_ms": 29876.6
+ },
+ "review/semantic": {
+  "n": 20,
+  "judge_mean": 1.7,
+  "judge_n": 20,
+  "tokens_mean": 87868.4,
+  "calls_mean": 11.6,
+  "lat_mean_ms": 33169.8,
+  "lat_p50_ms": 32269.9
+ },
+ "review/all": {
+  "n": 50,
+  "judge_mean": 1.74,
+  "judge_n": 50,
+  "tokens_mean": 92231.5,
+  "calls_mean": 12.3,
+  "lat_mean_ms": 31190.1,
+  "lat_p50_ms": 30024.0
+ },
+ "delta/selfcheck_vs_single": {
+  "improved": 3,
+  "degraded": 4,
+  "same": 43,
+  "unscored": 0
+ },
+ "delta/review_vs_single": {
+  "improved": 6,
+  "degraded": 10,
+  "same": 34,
+  "unscored": 0
+ },
+ "review/verdict_dist": {
+  "correct": 23,
+  "partial": 26,
+  "unparsed": 1
+ },
+ "review/draft_vs_final_judge": {
+  "draft_better": 9,
+  "final_better": 4,
+  "tie": 37,
+  "unscored": 0
+ }
+}

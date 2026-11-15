@@ -1,0 +1,500 @@
+{
+ "version": 2,
+ "note": "20 条原始集 + 30 条扩充（q21-q50），2026-11-14 扩样本复核用；gold 逐条按块全文核对",
+ "queries": [
+  {
+   "id": "q01",
+   "type": "exact",
+   "text": "RRF 融合的 k 值默认是多少？",
+   "gold": [
+    "rag-total-0041",
+    "rag-total-0051"
+   ],
+   "note": "0041 给出 k=60 代码与衰减速度解释；0051 讲 k 不是准确率旋钮"
+  },
+  {
+   "id": "q02",
+   "type": "exact",
+   "text": "bge-reranker-base 在重排里怎么用？",
+   "gold": [
+    "rag-total-0054",
+    "rag-total-0055"
+   ],
+   "note": "0054 有 FlagReranker 调用代码；0055 是重排模型选型表"
+  },
+  {
+   "id": "q03",
+   "type": "exact",
+   "text": "rank_bm25 的 BM25Okapi 默认参数 k1 和 b 是多少？",
+   "gold": [
+    "rag-total-0047",
+    "rag-total-0040"
+   ],
+   "note": "0047 明确 k1=1.5、b=0.75；0040 是 BM25 公式实现"
+  },
+  {
+   "id": "q04",
+   "type": "exact",
+   "text": "Chroma 的 PersistentClient 怎么创建？",
+   "gold": [
+    "chroma-0049",
+    "chroma-0017"
+   ],
+   "note": "0049 持久化模式代码；0017 四种客户端模式对比"
+  },
+  {
+   "id": "q05",
+   "type": "exact",
+   "text": "interrupt 恢复时 thread_id 换了会怎样？",
+   "gold": [
+    "flow-control-0033",
+    "flow-control-0047"
+   ],
+   "note": "0033 要求同一 thread_id；0047 踩坑清单第 2/12 条"
+  },
+  {
+   "id": "q06",
+   "type": "exact",
+   "text": "Qdrant Docker Compose 的端口映射怎么配？",
+   "gold": [
+    "qdrant-0009",
+    "qdrant-0010"
+   ],
+   "note": "0009/0010 是同一段 docker-compose 被切成的两块，都必须命中"
+  },
+  {
+   "id": "q07",
+   "type": "exact",
+   "text": "HyDE 适合什么场景？",
+   "gold": [
+    "rag-total-0044",
+    "rag-total-0081"
+   ],
+   "note": "0044 查询侧四种加工表；0081 五种增强表"
+  },
+  {
+   "id": "q08",
+   "type": "exact",
+   "text": "MMR 的 lambda 参数有什么作用？",
+   "gold": [
+    "rag-total-0060",
+    "chroma-0065"
+   ],
+   "note": "0060 MMR 代码与 lam 解释；0065 LangChain search_type=mmr 参数"
+  },
+  {
+   "id": "q09",
+   "type": "exact",
+   "text": "LangGraph 的 SqliteSaver 用在什么场景？",
+   "gold": [
+    "flow-control-0031",
+    "flow-control-0052"
+   ],
+   "note": "0031 存储四档；0052 D11 实测用 SqliteSaver（durability=sync）"
+  },
+  {
+   "id": "q10",
+   "type": "exact",
+   "text": "Contextual Retrieval 1.9% 的失败率是怎么降下来的？",
+   "gold": [
+    "rag-total-0095",
+    "retrieval-paradigm-0014"
+   ],
+   "note": "0095 三段数字表与成本；0014 汇总数字表"
+  },
+  {
+   "id": "q11",
+   "type": "exact",
+   "text": "hnsw:M 参数调大有什么用？",
+   "gold": [
+    "chroma-0022",
+    "chroma-0092"
+   ],
+   "note": "0022 HNSW 参数配置；0092 查询慢时调到 32"
+  },
+  {
+   "id": "q12",
+   "type": "exact",
+   "text": "GraphRAG 建图 281 分钟是在什么配置下测的？",
+   "gold": [
+    "rag-total-0098",
+    "retrieval-paradigm-0015"
+   ],
+   "note": "0098 给出 600 token 窗口/百万 token/16GB 口径；0015 复述该数字"
+  },
+  {
+   "id": "q13",
+   "type": "semantic",
+   "text": "想在本机离线跑一个向量检索，选哪个库最省心？",
+   "gold": [
+    "chroma-0000",
+    "chroma-0004",
+    "chroma-0104"
+   ],
+   "note": "改写自 Chroma 定位（像 SQLite、开箱即用、嵌入式优先），无原文关键词"
+  },
+  {
+   "id": "q14",
+   "type": "semantic",
+   "text": "Agent 长任务崩溃重启后，怎么避免重复扣款？",
+   "gold": [
+    "flow-control-0024",
+    "flow-control-0025",
+    "flow-control-0051"
+   ],
+   "note": "改写自幂等章节：重复扣款、幂等键/先查后写/状态机、检查点不保证副作用一次"
+  },
+  {
+   "id": "q15",
+   "type": "semantic",
+   "text": "怎么让用户看到模型答案是从哪份资料的哪一段来的？",
+   "gold": [
+    "kb-rag-0032",
+    "rag-total-0058",
+    "rag-total-0063"
+   ],
+   "note": "改写自引用溯源：chunk↔原文映射、来源编号、提示词标编号"
+  },
+  {
+   "id": "q16",
+   "type": "semantic",
+   "text": "用户提问和文档里的用词差得很远，召回不准怎么办？",
+   "gold": [
+    "kb-rag-0026",
+    "kb-rag-0036",
+    "rag-total-0029"
+   ],
+   "note": "改写自检索策略取舍与领域失配：混合检索+HyDE、同义改写"
+  },
+  {
+   "id": "q17",
+   "type": "semantic",
+   "text": "手头只有几百页资料，要不要上 GraphRAG？",
+   "gold": [
+    "kb-rag-0034",
+    "rag-total-0098",
+    "retrieval-paradigm-0016"
+   ],
+   "note": "改写自判定三步：先数页数、不到 500 页别上"
+  },
+  {
+   "id": "q18",
+   "type": "semantic",
+   "text": "切块的时候怎么保护表格和代码块不被切断？",
+   "gold": [
+    "kb-rag-0006",
+    "kb-rag-0022",
+    "rag-total-0023"
+   ],
+   "note": "改写自切分策略：结构感知、表格保护、chunk size/overlap 经验值"
+  },
+  {
+   "id": "q19",
+   "type": "semantic",
+   "text": "多个知识库之间怎么隔离，避免低权限用户问到高权限内容？",
+   "gold": [
+    "kb-rag-0010",
+    "kb-rag-0031",
+    "rag-total-0045"
+   ],
+   "note": "改写自多库隔离三种做法：独立 collection/命名空间/元数据字段"
+  },
+  {
+   "id": "q20",
+   "type": "semantic",
+   "text": "粗排召回的结果看起来像但不够准，怎么再提一档？",
+   "gold": [
+    "kb-rag-0028",
+    "rag-total-0052",
+    "kb-rag-0027"
+   ],
+   "note": "改写自重排章节：粗排一维 vs 精排二维、RRF+交叉编码器"
+  },
+  {
+   "id": "q21",
+   "type": "exact",
+   "text": "Chroma 支持哪三种 distance_metric？",
+   "gold": [
+    "chroma-0006"
+   ],
+   "note": "0006 列 l2/ip/cosine 三种与适用场景"
+  },
+  {
+   "id": "q22",
+   "type": "exact",
+   "text": "Chroma 的 where_document 里 $contains 和 $not_contains 是做什么的？",
+   "gold": [
+    "chroma-0046"
+   ],
+   "note": "0046 where_document 的 $contains/$not_contains 文档内容过滤"
+  },
+  {
+   "id": "q23",
+   "type": "exact",
+   "text": "Chroma 的 hnsw:M 和 hnsw:ef_construction 参数分别管什么？",
+   "gold": [
+    "chroma-0022",
+    "chroma-0082"
+   ],
+   "note": "0022 配置示例，0082 性能优化表给默认值"
+  },
+  {
+   "id": "q24",
+   "type": "exact",
+   "text": "Qdrant 的 Scalar 量化和 Product 量化有什么区别？",
+   "gold": [
+    "qdrant-0052",
+    "qdrant-0054"
+   ],
+   "note": "0052/0054 两节各自代码与说明"
+  },
+  {
+   "id": "q25",
+   "type": "exact",
+   "text": "Qdrant 稀疏向量适合表示哪几类特征？",
+   "gold": [
+    "qdrant-0073"
+   ],
+   "note": "0073 概述列 BM25/关键词/one-hot 三类"
+  },
+  {
+   "id": "q26",
+   "type": "exact",
+   "text": "Qdrant 创建 payload 索引时 text_index 的 tokenizer 参数怎么配？",
+   "gold": [
+    "qdrant-0066",
+    "qdrant-0067"
+   ],
+   "note": "0066/0067 payload 索引与 text_index 配置"
+  },
+  {
+   "id": "q27",
+   "type": "exact",
+   "text": "检查点 durability 三档 exit/async/sync 分别在什么时候写快照？",
+   "gold": [
+    "flow-control-0030"
+   ],
+   "note": "0030 三档表：何时写/崩溃代价/适用"
+  },
+  {
+   "id": "q28",
+   "type": "exact",
+   "text": "为什么 interrupt 不能被 except Exception 捕获？",
+   "gold": [
+    "flow-control-0036"
+   ],
+   "note": "0036 GraphInterrupt 靠抛异常传回图"
+  },
+  {
+   "id": "q29",
+   "type": "exact",
+   "text": "HITL 的 approve/edit/reject/respond 四种决策分别是什么意思？",
+   "gold": [
+    "flow-control-0042"
+   ],
+   "note": "0042 四种决策表"
+  },
+  {
+   "id": "q30",
+   "type": "exact",
+   "text": "幂等的三种做法分别是什么、各自适合什么场景？",
+   "gold": [
+    "flow-control-0025"
+   ],
+   "note": "0025 幂等键/先查后写/状态机表"
+  },
+  {
+   "id": "q31",
+   "type": "exact",
+   "text": "RAGAs 评测用哪四个指标？",
+   "gold": [
+    "rag-total-0073"
+   ],
+   "note": "0073 faithfulness/answer_relevancy/context_precision/context_recall"
+  },
+  {
+   "id": "q32",
+   "type": "exact",
+   "text": "Faithfulness 指标的具体计算步骤是什么？",
+   "gold": [
+    "rag-total-0072"
+   ],
+   "note": "0072 拆句→逐条验证→除以总数"
+  },
+  {
+   "id": "q33",
+   "type": "exact",
+   "text": "切块 chunk size 和 overlap 的经验值各是多少？",
+   "gold": [
+    "rag-total-0023",
+    "kb-rag-0022"
+   ],
+   "note": "0023 参数表；0022 答法要点 overlap 防边界"
+  },
+  {
+   "id": "q34",
+   "type": "exact",
+   "text": "MinerU Hybrid 方案里 Pipeline 和 VLM 怎么分工？",
+   "gold": [
+    "kb-rag-0019"
+   ],
+   "note": "0019 本地 Pipeline+Qwen-VL VLM"
+  },
+  {
+   "id": "q35",
+   "type": "exact",
+   "text": "扫描件图片型 PDF 用什么 OCR 处理？",
+   "gold": [
+    "kb-rag-0020"
+   ],
+   "note": "0020 PaddleOCR 3.7.0 PP-OCRv6"
+  },
+  {
+   "id": "q36",
+   "type": "exact",
+   "text": "文档更新后 Embedding 同步有哪三种做法？",
+   "gold": [
+    "rag-total-0031",
+    "kb-rag-0024"
+   ],
+   "note": "0031 全量重建/定点替换/版本化；0024 collection versioning"
+  },
+  {
+   "id": "q37",
+   "type": "exact",
+   "text": "有重排和无重排时 Top-K 的取值各怎么定？",
+   "gold": [
+    "rag-total-0056",
+    "kb-rag-0030"
+   ],
+   "note": "0056 场景表；0030 先粗排放大再精排收敛"
+  },
+  {
+   "id": "q38",
+   "type": "exact",
+   "text": "GraphRAG 查询期怎么区分局部问题和全局问题？",
+   "gold": [
+    "rag-total-0087",
+    "retrieval-paradigm-0006"
+   ],
+   "note": "0087 两条检索路；0006 社区摘要=物化视图"
+  },
+  {
+   "id": "q39",
+   "type": "semantic",
+   "text": "两路召回的分数没法直接相加，怎么合并才不让量纲大的那一路说了算？",
+   "gold": [
+    "rag-total-0042",
+    "rag-total-0041"
+   ],
+   "note": "改写自 7.4 融合三做法与 RRF 只看名次，无原文关键词"
+  },
+  {
+   "id": "q40",
+   "type": "semantic",
+   "text": "用户问得特别口语、还带着前文指代，原样拿去检索命中很差",
+   "gold": [
+    "rag-total-0044",
+    "rag-total-0067"
+   ],
+   "note": "改写自 7.6 查询侧加工与 10.2 多轮改写，无原文关键词"
+  },
+  {
+   "id": "q41",
+   "type": "semantic",
+   "text": "切块切得太碎召回全是噪声，切得太大相关内容被稀释，怎么定一个度？",
+   "gold": [
+    "rag-total-0025",
+    "rag-total-0021"
+   ],
+   "note": "改写自 4.5 五个坑与 4.2 九种策略，无原文关键词"
+  },
+  {
+   "id": "q42",
+   "type": "semantic",
+   "text": "评估方案里哪些指标要标准答案、哪些可以不要人工参与？",
+   "gold": [
+    "rag-total-0074"
+   ],
+   "note": "改写自 11.5 四种评估方式对比，要不要人工一列"
+  },
+  {
+   "id": "q43",
+   "type": "semantic",
+   "text": "检索那一步明明召回了，最后答案还是不对，问题可能出在哪一环？",
+   "gold": [
+    "rag-total-0057",
+    "rag-total-0113"
+   ],
+   "note": "改写自 8.6 重排救不回什么与 16.2 排查顺序"
+  },
+  {
+   "id": "q44",
+   "type": "semantic",
+   "text": "长对话聊到后面上下文塞不下了，早期的信息怎么压损失最小？",
+   "gold": [
+    "rag-total-0069",
+    "rag-total-0068"
+   ],
+   "note": "改写自 10.4 历史怎么压与 10.3 对话状态，无原文关键词"
+  },
+  {
+   "id": "q45",
+   "type": "semantic",
+   "text": "任务中途失败重启后不想从头再跑，又怕外部系统被重复写入",
+   "gold": [
+    "flow-control-0029",
+    "flow-control-0024"
+   ],
+   "note": "改写自 pending writes 与幂等动机，无原文关键词"
+  },
+  {
+   "id": "q46",
+   "type": "semantic",
+   "text": "召回出来的几段内容说的是同一件事，塞进上下文只会浪费篇幅",
+   "gold": [
+    "rag-total-0060"
+   ],
+   "note": "改写自 9.3 MMR 去重，无原文关键词"
+  },
+  {
+   "id": "q47",
+   "type": "semantic",
+   "text": "粗排给的排序看着合理，但真正对的证据排在很后面，下一步干什么？",
+   "gold": [
+    "rag-total-0052",
+    "rag-total-0053"
+   ],
+   "note": "改写自 8.1/8.2 重排动机与双塔/交叉编码对比"
+  },
+  {
+   "id": "q48",
+   "type": "semantic",
+   "text": "切块时丢掉的主语信息，检索期再怎么调权重也补不回来",
+   "gold": [
+    "rag-total-0094",
+    "retrieval-paradigm-0004"
+   ],
+   "note": "改写自 13.10 Contextual Retrieval 索引期丢信息"
+  },
+  {
+   "id": "q49",
+   "type": "semantic",
+   "text": "新数据进来老的社区摘要整批作废，图谱类方案的更新成本怎么降？",
+   "gold": [
+    "rag-total-0096",
+    "retrieval-paradigm-0008"
+   ],
+   "note": "改写自 13.11 LightRAG 并集与范式文档 2.4"
+  },
+  {
+   "id": "q50",
+   "type": "semantic",
+   "text": "上线后想持续盯着检索质量有没有退化，盯哪几条曲线？",
+   "gold": [
+    "rag-total-0107"
+   ],
+   "note": "改写自 14.3 监控四条曲线，无原文关键词"
+  }
+ ]
+}

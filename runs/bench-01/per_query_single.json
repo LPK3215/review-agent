@@ -1,0 +1,4344 @@
+[
+ {
+  "id": "q01",
+  "type": "exact",
+  "text": "RRF 融合的 k 值默认是多少？",
+  "gold": [
+   "rag-total-0041",
+   "rag-total-0051"
+  ],
+  "arms": {
+   "single": {
+    "final": "**RRF 的 k 默认取 60。**\n\n要点：\n- k=60 是社区经验值，出自 Cormack 等 2009 SIGIR 的 RRF 论文，不是本项目自己调出来的。\n- **k 不是准确率旋钮**。调 k 改变的是名次衰减速度：k 越大，排名靠前与靠后文档的得分差距被压得越平，融合结果越平均；k 越小，越偏向名次靠前的单路结果。所以没有「调k提升效果」这种用法，它是稳与锐之间的一档偏好。\n- RRF 只使用名次，不使用分数，因此天然绕开向量相似度与 BM25 分数不同量纲的问题，也不需要归一化；代价是把弱路的尾部噪声一起带进来。\n\n依据：[[concept/hybrid-retrieval]]",
+    "usage": {
+     "prompt_tokens": 10632,
+     "completion_tokens": 278,
+     "total_tokens": 10910
+    },
+    "elapsed_ms": 8720.810651779175,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/hybrid-retrieval.md"
+       },
+       "search_wiki": {
+        "query": "RRF"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/hybrid-retrieval.md\", \"lines\": \"1-52/52\", \"content\": \"---\\ntitle: 混合检索与重排：两路召回、RRF 融合、交叉编码器精排\\ntype: concept\\nsources: [raw/kb-rag.md, raw/qdrant.md]\\nupdated: 2026-02-14\\nsu",
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:20 — | 命中率 / MRR / 端到端准确率式对照实验 | 对照四组（只向量 / 只 BM25 / RRF / 叠 Rerank）时需要固定 gold 才能比 |\", \"concept/hybrid-retrieval.md:2 — title: 混合检索与重排：两路召回、RRF 融合"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案明确给出 k 默认 60，与参考资料一致，并正确解释了 k 调节名次衰减速度而非准确率，未编造实质性错误内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 618,
+     "completion_tokens": 45,
+     "total_tokens": 663
+    }
+   }
+  }
+ },
+ {
+  "id": "q02",
+  "type": "exact",
+  "text": "bge-reranker-base 在重排里怎么用？",
+  "gold": [
+   "rag-total-0054",
+   "rag-total-0055"
+  ],
+  "arms": {
+   "single": {
+    "final": "**bge-reranker-base 在 RAG 重排里怎么用**\n\n**1. 它处在链路的哪一步**\n它在「粗排 → 精排」两段式中的第二段。四段流程是：向量/BM25 两路召回 topM(50 起) → RRF 融合 topP(20–100) → 交叉编码器 Rerank → 取 topK 3~8 条进 prompt。粗排负责召回率、精排负责准确率；候选 20–100 条是常见区间，先粗排放大召回、再精排收敛到 3~8，**有 Rerank 才能放大 K，没有 Rerank 时放大 K 会直接掉准确率**。\n\n**2. 机制上它在做什么**\n粗排（双塔）是一维的：query 与文档各自压成一个向量，比一条轴上的距离，两边零交互；精排（cross-encoder）是二维的：`[query, doc]` 拼成一条序列进同一个模型，token 级互相 attend，输出一个相关性分数。所以它比的是「这个条件成不成立」而不是「像不像」——这正是 Rerank 能把 RRF 的「像」变成「对」的原因。这也决定了它的工程形态：**不进索引、不预计算文档向量，每次查询对每个 (query, doc) 对现场前向一次**，所以成本 ∝ 候选数 × 长度。\n\n**3. 具体接法（工程落地）**\n- 位置：RRF（或加权求和）融合结果之后、上下文组装之前；输出按分数重排并截断到 topK。\n- 输入：成对 `(query, chunk_text)`；分数是标量，可直接用于排序，也可合成置信度（结合命中块数量、命中块分散程度）来做「直接答 / 答并标注依据有限 / 拒答」三层策略。\n- 长度：bge-reranker-**base**（及 large）上限 **512 token**，query+doc 合计超长要截断——这是 base 最需要留意的一条；更新的 **bge-reranker-v2-m3** 上限 8192、但推荐训练长度仍是 1024。所以用 base 时要把 chunk 控制在能塞进 512 的范围内，或换 v2-m3。\n- 部署：本地 BGE 属「三选一」里的自托管路线（不做 / 云 API / 本地 BGE），可控但要 GPU；GPU 批处理打分是常规做法，打分延迟是百 ms 级，位于「查询向量化 → ANN 检索 → 重排 → 生成」四瓶颈的第三位，通常不是 RAG 慢的元凶（大头在生成）。\n- 与混合检索的关系：它是「两路召回 + RRF + cross-encoder」默认配置的最后一环，是 [[concept/hybrid-retrieval]] 里说的叠加项，与 Contextual Retrieval、BM25 同方向叠加而非互斥替代。\n\n**4. 边界（base 尤其要注意）**\n- **召回没捞出来的，重排救不回**：它是「在已入库候选里挑」，不改善 Recall，所以先看 Recall 再看排序。\n- 候选数超过模型/显存能承受的上限要先截断，截断掉的真相关就丢了。\n- 多跳问题单条打分不够（需要查询拆分或图检索）；表格被切碎这类错误，重排也救不回。\n- 中文场景下 base 的多语言/中文长句能力弱于 m3；若语料中文术语密集，建议直接评估 v2-m3 或 multilingual 版本（知识库仅有「本地 BGE」这一档描述与长度差异，未给出 base 与 m3 的中文实测对比，这一点需自测）。\n- 代价：多一层精排，延迟与维护成本上升；无标注数据的项目不要一开始就上学习式融合。\n\n**追问口径**：为什么已按相似度排序还要 Rerank？——因为粗排是一维距离、两边无交互，维度再高也只是把同一条轴拉长；精排让 query 与 doc 的 token 两两交互，判的是关系而非距离。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]、[[source/kb-rag]]",
+    "usage": {
+     "prompt_tokens": 63921,
+     "completion_tokens": 1380,
+     "total_tokens": 65301
+    },
+    "elapsed_ms": 22094.00725364685,
+    "steps": 8,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "bge-reranker"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/hybrid-retrieval.md:32 — 重排实现三选一：不做（排名噪声原样进 prompt）、云 API（省事但有候选数上限与网络依赖）、本地 BGE（可控但要 GPU；bge-reranker-v2-m3 上限 8192 token 但推荐训练长度 1024，更早的 base/\", \"source/kb-rag.md:54 — **"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "kb-rag.md",
+        "offset": "40",
+        "limit": "40"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# kb-rag.md 行 41-80 / 379\\n- 各自的建索引成本、查询延迟、更新成本分别落在哪一侧？\\n- 哪种模式下知识源变更最贵？为什么？\\n- 只在单份长文档内问答该选哪个？需要跨文档追关系该选哪个？\\n- 文档每天在变、量又很大，选哪个？\\n- 已经有一堆整理好的 Markdown 笔记，还需要建向量库吗？\\n- 什么是本体论，本体 sc"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "kb-rag.md",
+        "offset": "95",
+        "limit": "60"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# kb-rag.md 行 96-155 / 379\\n\\n### 查询理解与意图路由\\n\\n- 意图识别怎么做的？为什么用 BERT 不用大模型，BERT 微调样本多大？\\n- 大概有多少个意图，动态路由多少路？\\n- 不同路由之间的边界怎么定？\\n- 意图识别前要不要做 Query 改写？上下文依赖和指代消解怎么落地？\\n- 什么时候改写、什么时候拆子"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "kb-rag.md",
+        "offset": "155",
+        "limit": "80"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# kb-rag.md 行 156-235 / 379\\n\\n### 检索范式：六种形态不是六选一\\n\\n- **结论**：六者的分歧只有一条轴——理解放在**写入端**还是**查询端**。写入端＝入库时把理解做完，查询时直接读；查询端＝入库只存原文，查询时现算。每往写入端移一格，查询便宜一分、错误被固化一分、语料变更后的重建成本涨一分。选型的实质不是挑最"
+      }
+     },
+     {
+      "step": 6,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "kb-rag.md",
+        "offset": "235",
+        "limit": "90"
+       }
+      },
+      "observe": {
+       "read_raw": "ERROR raw 回读额度已用完（上限 3）"
+      }
+     },
+     {
+      "step": 7,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案虽详细解释了重排的定位、机制与工程接法，但未给出参考资料中的具体用法（FlagReranker 初始化与 compute_score 调用、粗排20精排5的示例代码），且加入了参考资料未提及的细节（如512 token上限、v2-m3对比等），属于部分覆盖并有轻微编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1339,
+     "completion_tokens": 84,
+     "total_tokens": 1423
+    }
+   }
+  }
+ },
+ {
+  "id": "q03",
+  "type": "exact",
+  "text": "rank_bm25 的 BM25Okapi 默认参数 k1 和 b 是多少？",
+  "gold": [
+   "rag-total-0047",
+   "rag-total-0040"
+  ],
+  "arms": {
+   "single": {
+    "final": "wiki 中关于 BM25 的内容只提到「idf / k1 / b 三变量」和「中文必须先分词」，没有记录 `rank_bm25` 的 `BM25Okapi` 默认参数值。\n\n**结论：知识库答不了这个具体数值。** 现有页面（[[concept/hybrid-retrieval]]、[[source/rag-total]]）只覆盖了 BM25 的机制层面：\n\n- BM25 有三个变量：idf、k1（词频饱和速度）、b（文档长度归一化强度）——`source/rag-total.md` 第七节「三种召回与 BM25 三变量（idf / k1 / b）」。\n- 中文场景必须先分词并补业务专有词，否则 BM25 对黑话基本无效（[[concept/hybrid-retrieval]] 失效边界）。\n- 混合检索里 BM25 是「管精确串」的那一路，与向量路用 RRF 融合；RRF 的 k（社区经验值 60）与 BM25 的 k1 是两回事，别混——[[concept/hybrid-retrieval]] 明确写了「RRF 的 k 不是准确率旋钮」。\n- 语料全是同义改写型问法时，BM25 增量接近零。\n\n至于 `rank_bm25.BM25Okapi` 的构造函数默认值（我的常识记忆是 `k1=1.5`、`b=0.75`、`epsilon=0.25`，与经典 Okapi BM25 的常用取值一致），**wiki 里没有任何页面记录，raw 原文也未收录**，属于知识库外的信息，请以 `rank_bm25` 源码或官方文档为准，我不把它当作本库结论。若需要，可以 ingest 一份 rank_bm25 的源码/文档摘要页来补齐这一条。\n\n依据：[[concept/hybrid-retrieval]]、[[source/rag-total]]",
+    "usage": {
+     "prompt_tokens": 16827,
+     "completion_tokens": 603,
+     "total_tokens": 17430
+    },
+    "elapsed_ms": 11281.72516822815,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "k1"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"source/rag-total.md:42 — 三种召回与 BM25 三变量（idf / k1 / b）；中文必须先分词且补专有词。融合三种、RRF 的 k 不是准确率旋钮；两路不设阈值会让候选被噪声撑满。查询侧四种加工判断顺序：改写 → 拆分 → HyDE。多库隔离三档。关键词五法（T\"]}"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"1-88/88\", \"content\": \"---\\ntitle: 文档处理与 RAG 完整正文（原文摘要）\\ntype: source\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 十九章 RAG 总纲的压缩摘要：定义与适用"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 0,
+      "reason": "参考资料明确给出 BM25Okapi 默认 k1=1.5、b=0.75，候选答案却称知识库未记录、拒绝作答，属于未回答问题。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 888,
+     "completion_tokens": 49,
+     "total_tokens": 937
+    }
+   }
+  }
+ },
+ {
+  "id": "q04",
+  "type": "exact",
+  "text": "Chroma 的 PersistentClient 怎么创建？",
+  "gold": [
+   "chroma-0049",
+   "chroma-0017"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：用 `chromadb.PersistentClient(path=...)`，把数据目录传进去即可；同一目录只能在同进程内由一个客户端独占，跨进程共享要改用 `HttpClient`。**\n\n```python\nimport chromadb\n\nclient = chromadb.PersistentClient(path=\"./chroma_db\")     # 数据落盘到该目录\n# 可选：client = chromadb.PersistentClient(path=\"./chroma_db\", settings=Settings(anonymized_telemetry=False))\n\ncollection = client.get_or_create_collection(\n    name=\"docs\",\n    metadata={\"hnsw:space\": \"cosine\"},                    # 默认 L2，文本语义常用 cosine\n)\n```\n\n要点与坑（依据 wiki 对 Chroma 的整理）：\n\n1. **四种客户端对应四种运行模式**：内存 `Client()`（进程退出即丢）、持久化 `PersistentClient(path=)`（落盘）、远程 `HttpClient(host, port)`、带认证的 `HttpClient`。`PersistentClient` 是「嵌入式优先」哲学的直接体现——不用起独立服务，像 SQLite 一样随应用分发。\n2. **持久化目录结构**：目录里有 `chroma.sqlite3`（元数据）+ 每个 collection 一个子目录（`data.parquet`、HNSW 索引、WAL）。因此备份就是拷贝数据目录并保留最近 N 份。\n3. **嵌入模型一致性**：入库与查询必须用同一个嵌入模型（不传 embeddings 时默认 `all-MiniLM-L6-v2`；中文实践常显式换成 `BAAI/bge-base-zh-v1.5` 的 Sentence-Transformer EmbeddingFunction），否则报 `Dimension mismatch`。\n4. **同目录不可多进程并用**：`PersistentClient` 相当于本地独占打开，需要多进程/多机共享时换 `chroma run` + `HttpClient`（Docker/K8s 集群也只是换连接地址，API 不变）。\n5. **写入性能**：每次调用都是一次本地事务，所以批量接口是关键——`add`/`upsert` 分批送（原示例每批 100–1000 条），别一次性灌大量数据。\n6. 一旦用了 `PersistentClient`，collection 名建议 `get_or_create_collection`，避免重启后 `Collection not found`。\n\n典型片段：\n\n```python\ncollection.add(\n    ids=[\"1\", \"2\"],\n    documents=[\"Chroma 是嵌入数据库\", \"PersistentClient 落盘\"],\n    metadatas=[{\"src\": \"a\"}, {\"src\": \"b\"}],\n)\nres = collection.query(query_texts=[\"怎么持久化\"], n_results=5,\n                       where={\"src\": \"a\"})   # 无原生阈值参数，需按 distances 二次筛\n```\n\n依据：[[entity/chroma]]、[[source/chroma]]",
+    "usage": {
+     "prompt_tokens": 11133,
+     "completion_tokens": 708,
+     "total_tokens": 11841
+    },
+    "elapsed_ms": 11668.628931045532,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/chroma.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/chroma.md\", \"lines\": \"1-48/48\", \"content\": \"---\\ntitle: Chroma 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Chroma 的定位、核心概念、嵌入系统、CRUD"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了 PersistentClient(path=...) 创建方式，并补充了四种客户端模式、持久化目录、独占打开等要点，与参考资料一致且无编造错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 963,
+     "completion_tokens": 49,
+     "total_tokens": 1012
+    }
+   }
+  }
+ },
+ {
+  "id": "q05",
+  "type": "exact",
+  "text": "interrupt 恢复时 thread_id 换了会怎样？",
+  "gold": [
+   "flow-control-0033",
+   "flow-control-0047"
+  ],
+  "arms": {
+   "single": {
+    "final": "## 结论\n\n**恢复时换 thread_id，就等于换了一条全新的线：从图的开头重新运行，不是「从断点继续」。** 原来那条线程会永久挂在「等待人工」的状态，不会自己继续。\n\n### 为什么\n\n- `thread_id` 是检查点的主键，不是线程 ID；复用它表示续接同一条线，换掉它就表示另一条线。每个 thread_id 各有一份状态历史。\n- 恢复的前提是「让运行恢复」：resume 要按 thread_id 找到那份检查点、读出 pending writes 和 interrupt 的存储内容，再把恢复值按任务级列表下标喂回去。主键不匹配，这些全都取不到。\n- 注意：即使 thread_id 相同，也是**整个节点重跑**（重入），而不是断点续行；thread_id 变了则连这一点都做不到，属于「新会话」。\n\n### 具体表现\n\n| 后果 | 说明 |\n|---|---|\n| GraphInterrupt 无人接管 | 新线程没有挂起的 interrupt，**恢复值无处投递** | \n| 状态丢失 | 已完成的 super-step 产物不会带到新线程；进度回到 `START` |\n| 旧线程悬挂 | 原 thread_id 那份检查点还在存储里，但没有代码去 resume 它 |\n| 副作用风险 | 若新线程真跑起来，等于把之前已执行的前置动作再做一遍（如已扣款、已发信） |\n\n### 正确的恢复方式\n\n1. 恢复时**原样带回** `interrupt` 返回的那个 thread_id（LangGraph 里就是 config 的 `configurable.thread_id`），并把人工决策值通过 `Command(resume=...)` 投回去。\n2. 不要把 thread_id 当成可自由重生成的请求 ID；它应和业务实体（会话/工单/订单）绑定后持久化，否则进程重启后自己都找不回。\n3. 如果业务上**确实要换 id**（比如强制开新会话），那要显式当作「放弃旧会话」处理：清理或归档旧检查点、对已发生的副作用做补偿或幂等去重，不能指望它自动续上。\n4. 想在恢复后仍不重复扣钱：靠 [[concept-idempotency]] 的幂等键/状态机保底，因为检查点只保证「知道从哪继续」，不保证「副作用只发生一次」。\n\n一句话：**框架负责停在哪、存什么、从哪续，而「从哪续」的钥匙就是 thread_id；钥匙换了，门就开不了。**\n\n依据：[[concept-checkpoint-recovery]]、[[concept-interrupt-hitl]]",
+    "usage": {
+     "prompt_tokens": 11112,
+     "completion_tokens": 676,
+     "total_tokens": 11788
+    },
+    "elapsed_ms": 9501.713514328003,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/interrupt-hitl.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/interrupt-hitl.md\", \"lines\": \"1-42/42\", \"content\": \"---\\ntitle: interrupt 四条硬规则与人机协同（HITL）\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: inter"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料核心要点：换 thread_id 等于另开空线程，且补充说明了节点重跑、状态丢失等，无实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1025,
+     "completion_tokens": 43,
+     "total_tokens": 1068
+    }
+   }
+  }
+ },
+ {
+  "id": "q06",
+  "type": "exact",
+  "text": "Qdrant Docker Compose 的端口映射怎么配？",
+  "gold": [
+   "qdrant-0009",
+   "qdrant-0010"
+  ],
+  "arms": {
+   "single": {
+    "final": "知识库里 `source/qdrant.md` 只压到「REST 6333 / gRPC 6334、Compose 含 healthcheck 与内存限额、挂 `qdrant_storage` 卷」这一层，具体 YAML 我回原文 4.4 节核实过，答案如下。\n\n## 端口映射怎么配\n\nQdrant 只有两个对外端口需要映射，`\"宿主:容器\"` 左右都写同一个值即可：\n\n```yaml\nservices:\n  qdrant:\n    image: qdrant/qdrant:latest\n    ports:\n      - \"6333:6333\"   # REST API（HTTP / Web UI / /readyz /metrics）\n      - \"6334:6334\"   # gRPC（Python 等 SDK 高频写入/批量场景更快）\n```\n\n要点：\n\n1. **6333 是 REST，6334 是 gRPC**，两个是独立端口，不写 6334 就只能走 REST。原文的 `docker run -p 6333:6333 -p 6334:6334 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant` 也是同样写法。\n2. **容器内端口由环境变量决定**，要和 `ports` 右侧保持一致：`QDRANT__SERVICE__HTTP_PORT=6333`、`QDRANT__SERVICE__GRPC_PORT=6334`（容器内绑定端口 = 等号右边 = 冒号右侧）。\n3. **想让宿主端口不同（如 16333）**改左侧即可，但同时要改客户端：`QdrantClient(\"localhost\", port=16333)`；gRPC 同理配 `grpc_port`。\n4. **生产别把 6333 裸暴露公网**：配 `QDRANT__SERVICE__API_KEY`，前面放反向代理做 TLS；容器间通信用 Docker 内部服务名 `qdrant:6333`，此时宿主映射只是给调试用，可以不写。\n5. **集群模式另有两个内部端口** 6335（P2P）/ 6336（共识），只在容器网络内部互通，不需映射到宿主，也不要暴露。\n6. `healthcheck` 探的是 `http://localhost:6333/readyz`，用的是容器内端口，与宿主映射无关；若改了容器内 HTTP 端口，这里要同步改。\n\n完整可用的最小 Compose（原文 4.4 口径）：\n\n```yaml\nversion: '3.8'\nservices:\n  qdrant:\n    image: qdrant/qdrant:latest\n    ports:\n      - \"6333:6333\"\n      - \"6334:6334\"\n    volumes:\n      - qdrant_data:/qdrant/storage\n    environment:\n      - QDRANT__SERVICE__HTTP_PORT=6333\n      - QDRANT__SERVICE__GRPC_PORT=6334\n      - QDRANT__SERVICE__API_KEY=your-secret-key\n      - QDRANT__STORAGE__OPTIMIZERS__INDEXING_THRESHOLD_KB=20000\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:6333/readyz\"]\n      interval: 10s\n      timeout: 5s\n      retries: 3\n    deploy:\n      resources:\n        limits:\n          memory: 4G\nvolumes:\n  qdrant_data:\n```\n\n依据：[[source/qdrant]]、[[entity/qdrant]]（原文 §4.1/§4.4 端口与环境变量口径；6335/6336 详见分布式章节）",
+    "usage": {
+     "prompt_tokens": 31149,
+     "completion_tokens": 1004,
+     "total_tokens": 32153
+    },
+    "elapsed_ms": 10615.95892906189,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/qdrant.md\", \"lines\": \"1-77/77\", \"content\": \"---\\ntitle: Qdrant 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Qdrant 的 Rust 高性能定位、Colle"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "Compose"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"entity/qdrant.md:39 — Docker 单机（推荐，挂 `qdrant_storage` 卷）、Docker Compose、K8s StatefulSet（3 副本 + headless Service + volumeClaimTemplates）、多节点集群（\", \"source/chroma.md:36 — 部署三档：本地嵌入式、`c"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "qdrant.md",
+        "offset": "40",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 41-240 / 2164\\n| 稀疏向量 | 原生支持稀疏向量（BM25、SPLADE 等） |\\n| 多向量 | 一个点可以有多个命名向量 |\\n| 向量量化 | Scalar / Product 量化减少内存占用 |\\n| 分布式 | 自动分片和副本，水平扩展 |\\n| 快照备份 | 支持在线快照，零停机备份恢复 |\\n|"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料中6333/6334端口映射、环境变量对应、卷挂载、healthcheck和内存限制等核心要点，并仅做了合理延伸，未出现与原文冲突的实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1181,
+     "completion_tokens": 57,
+     "total_tokens": 1238
+    }
+   }
+  }
+ },
+ {
+  "id": "q07",
+  "type": "exact",
+  "text": "HyDE 适合什么场景？",
+  "gold": [
+   "rag-total-0044",
+   "rag-total-0081"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：HyDE 用于「问题与资料的说法对不上、短的问句信息太少」的查询侧最后一招——在改写、拆分之后才值得启用；它能放大收益，也同时放大风险。**\n\n## 适用场景\n\n1. **问题口语化或表述过短，与文档措辞差距大**。例如用户只输入「那个退款多久到」，而文档写的是「退款到账时效说明」。假设答案文本（生成一段假想文档）会包含文档常用词，从而把向量拉到目标片段附近；这属于查询侧「查询改写」类加工。\n2. **领域专有词多、同义实体写法多**。询问方式与原文用语不一致，正是关键词检索和双塔向量都容易失效的区域；HyDE 用「先说出可能的答案」绕过措辞鸿沟。\n3. **启用前提是先完成改写、再完成拆分**。查询侧四种加工（4 种判定顺序）是：**先改写（最便宜、收益最稳）→ 再拆分（复合问题）→ 最后才用 HyDE（收益大、风险也大）**。前两步未做就直接上 HyDE，是在最贵的一步上碰运气。\n4. **作为聚合检索的增强手段**。HyDE 与 Self-RAG、LongRAG、多模态 RAG、Agentic RAG 同列在五种检索增强中，是在已有检索链路上叠加的增强手段，不能替代召回结构。\n\n## 不适合 / 慎用\n\n- **需要精确字符串匹配的场景**（编号、条款号、错误码、型号）：此时优势在 BM25 这类精确串检索，假设答案反而会把查询推离原文。\n- **必须零幻觉或可审计的严谨场景**：HyDE 生成的是「可能不存在的答案」，而生成的假设文档一旦事实错误，检索就会朝错误方向偏移。用于金融、ESG 等必须可核查的场景时，要保守启用。\n- **只做 HyDE、不接 rerank 或混合检索时**：它只在检索层放大语义相似度，无法解决「召回没捞到的重排救不回」的问题；块被切碎、表格被切断、多跳问题和它无关。\n- **延迟敏感或成本敏感的链路**：多一次生成模型调用，且生成的文档通常比原始问句长；若预算紧，应先压缩注入块数、更换小生成模型。\n\n## 一句话判断法\n\n先问「问题本身是否表达不清或措辞失配」——是，就先改写或拆分；仍不达标再上 HyDE；同时必须配混合检索和重排，否则单独用 HyDE 是「在一个不可靠信号上再加一层不可靠假设」。它属于查询端理解，不改变检索范式，改的是「查询怎么写」，不能改变「库里有没这块知识」。\n\n依据：[[concept/rag-pipeline]]、[[concept/hybrid-retrieval]]、[[source/rag-total]]、[[concept/retrieval-paradigm]]",
+    "usage": {
+     "prompt_tokens": 36138,
+     "completion_tokens": 894,
+     "total_tokens": 37032
+    },
+    "elapsed_ms": 11972.592830657959,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "HyDE"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:6 — summary: 从文档解析（MinerU Hybrid / PaddleOCR）到结构感知切分、BGE-M3 与版本化更新、混合检索加 HyDE、chunk↔原文映射，给出每段的选型理由、代价与失效边界；附在线七步、离线六环节、三种相似度\", \"concept/rag-pipeline.md:63 — "
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/hybrid-retrieval.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/hybrid-retrieval.md\", \"lines\": \"1-52/52\", \"content\": \"---\\ntitle: 混合检索与重排：两路召回、RRF 融合、交叉编码器精排\\ntype: concept\\nsources: [raw/kb-rag.md, raw/qdrant.md]\\nupdated: 2026-02-14\\nsu"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心要点：HyDE适合问法与原文措辞差距大的场景，且明确说明需先改写再拆分、HyDE放最后，收益大风险也大，与参考资料一致，无编造内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1124,
+     "completion_tokens": 60,
+     "total_tokens": 1184
+    }
+   }
+  }
+ },
+ {
+  "id": "q08",
+  "type": "exact",
+  "text": "MMR 的 lambda 参数有什么作用？",
+  "gold": [
+   "rag-total-0060",
+   "chroma-0065"
+  ],
+  "arms": {
+   "single": {
+    "final": "{\"action\": \"read_index\", \"args\": {}}",
+    "usage": {
+     "prompt_tokens": 1782,
+     "completion_tokens": 12,
+     "total_tokens": 1794
+    },
+    "elapsed_ms": 1452.98433303833,
+    "steps": 1,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 0,
+      "reason": "候选答案是工具调用JSON，完全未回答lambda参数作用，答非所问且无参考内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 359,
+     "completion_tokens": 33,
+     "total_tokens": 392
+    }
+   }
+  }
+ },
+ {
+  "id": "q09",
+  "type": "exact",
+  "text": "LangGraph 的 SqliteSaver 用在什么场景？",
+  "gold": [
+   "flow-control-0031",
+   "flow-control-0052"
+  ],
+  "arms": {
+   "single": {
+    "final": "**SqliteSaver 的适用场景：单机、单进程的验证档检查点存储，不是生产默认。**\n\n## 在存储四档中的位置\n\n| 档位 | 定位 |\n|---|---|\n| InMemorySaver | 开发测试（进程内、重启即失） |\n| **SqliteSaver** | **单机验证（落盘的文件型存储）** |\n| PostgresSaver | 生产默认，多进程/多副本共享 |\n| MongoDBSaver / Cosmos | 复用已有基础设施 |\n\n## 具体适用场景\n\n1. **本地调试、教程与 demo、小规模实验。**用来验证「带检查点的图、`interrupt()` 人工断点、断点恢复、HITL 审批流」能不能跑通。\n2. **想要「真正落盘的快照」但不想起数据库时。**它比 InMemorySaver 更接近真实（进程重启后快照还在），又零运维。\n3. **做恢复能力的单机对照实验。**D11 断点恢复实测（2026-11-13）里，增强模式就是 `SqliteSaver + durability=sync + 幂等副作用注册表`，结果 crash 场景只重做 2 步、write_fail 1 步、raise 3 步（基线恒 5 步），重复副作用 0（基线 crash 为 1），崩溃耗时 3891ms vs 基线 4144ms——足以支撑单机场景下完整恢复语义的验证。\n\n## 为什么不能直接上生产\n\n生产要的核心性质是「**多个执行进程能访问同一份存储**」，而不是「我用了 checkpointer」这句话本身。SQLite 是单机文件，多进程/多副本共享检查点不是它的设计目标；一旦上多执行进程、多副本、滚动发布，就该换 PostgresSaver。\n\n## 三个易踩点\n\n1. **checkpointer 默认不开**：必须 `compile(checkpointer=...)`，否则 `interrupt()` 无处落盘，恢复与记忆全失效。\n2. **换存储不解决「恰好一次」**：检查点只保证「知道从哪继续」，副作用唯一性要靠幂等键/先查后写/状态机（且高风险动作放在确认之后）。\n3. **durability 与存储选型正交**：`exit`（只在退出时写）/`async`（默认，可能丢最近一步）/`sync`（每步同步写完）。想用 SqliteSaver 验证崩溃不丢步，要显式设 `sync`；用 `exit` 硬杀后快照会全无、整链重做。\n\n一句话：**本地把机制跑对用 SqliteSaver，上生产看的是「几个进程共享一份存储」这件事。**\n\n依据：[[answers/answer-sqlitesaver-scenarios]]、[[concept/checkpoint-recovery]]、[[concept/idempotency]]、[[concept/interrupt-hitl]]、[[source/flow-control]]",
+    "usage": {
+     "prompt_tokens": 10929,
+     "completion_tokens": 751,
+     "total_tokens": 11680
+    },
+    "elapsed_ms": 7890.697956085205,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/checkpoint-recovery.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/checkpoint-recovery.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: 检查点与断点恢复：super-step、durability 与四类「停下」\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-0"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心定位（单机验证、非生产默认）、四档存储对比、断点恢复实验数据及生产多进程共享存储的关键区分，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1076,
+     "completion_tokens": 53,
+     "total_tokens": 1129
+    }
+   }
+  }
+ },
+ {
+  "id": "q10",
+  "type": "exact",
+  "text": "Contextual Retrieval 1.9% 的失败率是怎么降下来的？",
+  "gold": [
+   "rag-total-0095",
+   "retrieval-paradigm-0014"
+  ],
+  "arms": {
+   "single": {
+    "final": "## Contextual Retrieval 的失败率：5.7% → 1.9% 靠三个可叠加的做法\n\nAnthropic 2024-09-19《Introducing Contextual Retrieval》给出的是 **top-20 块检索失败率**的四档数字，1.9% 由阶梯式叠加得到：\n\n| 阶段 | 做法 | top-20 失败率 | 相对基线降幅 |\n|---|---|---|---|\n| 基线 | 普通向量 RAG（仅嵌入） | 5.7% | — |\n| 第一步 | **上下文嵌入**：每块补 50–100 token 位置说明后再做 embedding | 3.7% | 降 35% |\n| 第二步 | **+ 上下文 BM25**：同一段位置说明也拼进 BM25 索引，走混合检索 | 2.9% | 累计 49% |\n| 第三步 | **+ rerank**：对召回结果做交叉编码器重排 | **1.9%** | 累计 67% |\n\n### 每一步在补什么\n- **位置说明（contextual embedding）**：这份文档叫什么、属于哪一章、这一段在讲谁。补的是「块自己是谁」的信息，这是切块那一刻丢掉的，检索期再调权重也补不回来。修改范围只是索引管道多一步 LLM 调用。\n- **上下文 BM25**：让精确串匹配也能利用位置说明，与向量路融合，绕开两路的量纲差异。\n- **rerank**：把「像」变成「对」，在候选集上重新排序。\n\n### 报这个数字时必须同时说明的条件\n1. **1.9% 是三者齐上**，单说「Contextual Retrieval 把失败率降到 1.9%」不准确；只说位置说明那一步是 3.7% / 2.9% 档。\n2. 一次性成本 **$1.02 / 百万 document token**，并且**必须靠 prompt caching 才成立**，否则每块都重发整篇文档，会更昂贵。\n3. 官方测的是**英文语料**，中文需要重测。\n4. 它**补不了块与块之间的关系**：关系与多跳需求还是要靠图类方案。\n\n### 定位\n它是挂在向量 RAG 上的**索引期补丁**，不是第七条检索路线；失效边界是「块本身信息已完整时几乎无增量」，以及位置说明写错会把错误固化进索引。触发它的信号很清楚：检索常漏、召回的块里缺主语、缺上下文。\n\n依据：[[entity/contextual-retrieval]]、[[concept/retrieval-paradigm]]",
+    "usage": {
+     "prompt_tokens": 22777,
+     "completion_tokens": 743,
+     "total_tokens": 23520
+    },
+    "elapsed_ms": 9582.682847976685,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "retrieval-paradigm.md",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# retrieval-paradigm.md 行 1-189 / 189\\n# 检索范式选型：六种形态与理解的时点\\n\\n> 建立日期：2026-11-11　｜　来源：公众号「文艺理科生Owen」《别急着上 GraphRAG：RAG、LightRAG、LLM Wiki 怎么选》，已按本库要求核实重写并补面试口径\\n> 定位：**专项层选型对照**。知识库"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖参考资料的核心阶梯数字（5.7%→3.7%→2.9%→1.9%），并说明1.9%靠上下文嵌入、上下文BM25与rerank三者叠加，同时覆盖成本、prompt caching、英文语料与块间关系等关键条件，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1210,
+     "completion_tokens": 84,
+     "total_tokens": 1294
+    }
+   }
+  }
+ },
+ {
+  "id": "q11",
+  "type": "exact",
+  "text": "hnsw:M 参数调大有什么用？",
+  "gold": [
+   "chroma-0022",
+   "chroma-0092"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：把 `hnsw:M` 调大，主要是提高图索引的连通度，换来更高的召回率和更少的搜索跳数，代价是内存和建索引时间上涨。**\n\n## M 到底是什么\n\nHNSW 是分层可导航小世界图。`M` 控制每个节点在图上保留的双向连接数上限，也就是图的“度数”。它是**建索引期参数**，一旦建好，想要修改就得重建索引，不像 `ef_search` 那样可以每次查询时临时调整。^[raw/chroma.md]\n\n## 调大 M 的收益\n\n- **召回率上升**：邻居更多，图的连通性更好，贪心搜索更不容易掉进“局部死角”，在同样的 `ef_search` 下能命中更多真实近邻，即 recall@K 提升。\n- **搜索路径变短**：节点度数高，平均跳数减少，对随机访问和图遍历友好，在低 `ef_search` 设定下尤为明显。\n- **对高维、簇状、分布不均的数据更稳**：M 太小会形成断裂的团簇，边数增多能缓解“孤岛”。\n- 官方口径把 M/ef_search 一起当作“查询慢、召回不够”的首要可调参数（M=16、ef_construction=200 起步，查询慢就加 M/ef_search）。^[raw/chroma.md]\n\n## 代价\n\n- **内存占用近似线性增长**：每节点存 M×2 条有向边（每层加和），点数越大，M 带来的常驻内存开销越可观——这也是 Qdrant 一侧要靠标量量化、`on_disk` 把内存压回来的原因。^[raw/qdrant.md]\n- **建索引时间变长**：插入每条边都要做候选邻居选择，`ef_construction` 与 M 共同决定构图成本，全量重建的代价会翻倍。\n- **插入和更新变慢**：在线写入场景下，高 M 的尾部延迟更差。\n- **收益递减**：从 16 升到 32 通常看得出提升，再从 64 升到 128 往往只剩零点几个百分点的召回，但内存翻倍——继续加 M 不如加大 `ef_search` 或换更好的嵌入模型。\n\n## 参数分工（别只调 M）\n\n| 参数 | 阶段 | 调整它的效果 |\n|---|---|---|\n| `M` | 建索引 | 邻接表宽度：召回上限、内存、构建时间 |\n| `ef_construction` | 建索引 | 构图时候选池大小：图质量，构建时间 |\n| `ef_search`（Qdrant 的 `hnsw_ef`） | 查询 | 每次搜索的候选池：召回与延迟，随时可调，无副作用 |\n\n排查顺序建议：**先调整查询侧 `ef_search` 或 `hnsw_ef`**（零重建成本，够用就停），确认召回上限不够，再调整 M 或 `ef_construction` 并重建。Qdrant 侧还有 `exact` 精确搜索作为对照基准，可以量化“近似到底丢了多少”。^[raw/chroma.md]^[raw/qdrant.md]\n\n## 何时不该调大\n\n- 内存受限（边缘设备、嵌入式部署如 Chroma 的离线分发场景）：优先保内存，M 保持 16 左右。^[raw/chroma.md]\n- 数据频繁增删：高 M 会放大写入延迟和重建成本。\n- 规模很小（万级以内）：暴力精确搜索即可，索引参数意义不大。\n- 召回瓶颈其实在**切块、嵌入模型或混合检索缺失**上：M 调再大也救不回语义没进向量的内容，这类问题应转向 [[concept-rag-pipeline]]、[[concept-hybrid-retrieval]]。\n\n依据：[[entity/chroma]]、[[entity/qdrant]]、[[source/chroma]]",
+    "usage": {
+     "prompt_tokens": 32892,
+     "completion_tokens": 1099,
+     "total_tokens": 33991
+    },
+    "elapsed_ms": 15010.579586029053,
+    "steps": 6,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "HNSW"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-multi-kb-isolation.md:25 — 元数据过滤在向量库侧是一等公民：Qdrant 的 payload 过滤与 HNSW 深度集成（「过滤即搜索」），`Filter` 支持 must/should/must_not，配合 `MatchValue`/`MatchAny` 精确与多\", \"concept/rag-pip"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/qdrant.md\", \"lines\": \"1-62/62\", \"content\": \"---\\ntitle: Qdrant（Rust 编写的高性能向量数据库）\\ntype: entity\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Apache 2.0 的开源向量数据库，Rus"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "图索引"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": []}"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/chroma.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/chroma.md\", \"lines\": \"1-48/48\", \"content\": \"---\\ntitle: Chroma 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Chroma 的定位、核心概念、嵌入系统、CRUD"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料中关于 hnsw:M 的核心要点（连接数、调大可提升召回/查询性能但增加内存与构建成本），并补充了合理的参数分工解释，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1267,
+     "completion_tokens": 56,
+     "total_tokens": 1323
+    }
+   }
+  }
+ },
+ {
+  "id": "q12",
+  "type": "exact",
+  "text": "GraphRAG 建图 281 分钟是在什么配置下测的？",
+  "gold": [
+   "rag-total-0098",
+   "retrieval-paradigm-0015"
+  ],
+  "arms": {
+   "single": {
+    "final": "**GraphRAG 建图 281 分钟的实测配置**\n\n| 配置项 | 取值 |\n|---|---|\n| 语料规模 | 约 100 万 token |\n| 切块窗口 | 600 token |\n| 块数 | 1,669 块 |\n| 硬件 | 16GB 虚拟机 |\n\n即：**约 100 万 token 语料 + 600 token 窗口 + 1,669 块 + 16GB 虚拟机**，建图耗时 281 分钟（约合每分钟 3,600 token 的抽取吞吐）。同一配置下，全局查询从 20 秒起，单次读取几十万 token。\n\n几点使用提醒：\n- 这组数字出自 Edge et al.《From Local to Global: A Graph RAG Approach to Query-Focused Summarization》（arXiv:2404.16130）这条线的实测，属于「建库一遍」的账；图类的成本几乎全落在**重建**而非查询，估算总成本时要再乘以预计重建次数。\n- 同规模下 LightRAG 的整体重建约 1,399 万 token（1,399 社区 × 2 遍 × 约 5,000 token），可与 281 分钟这组做横向参照。\n- 因此，不用 GraphRAG 的正当理由是「知识库不到 500 页」或「问题不是全局归纳类」，而不是仓库维护状态，因为该仓库未归档、仍在推送。\n\n依据：[[entity/graphrag]]、[[concept/retrieval-paradigm]]",
+    "usage": {
+     "prompt_tokens": 11559,
+     "completion_tokens": 430,
+     "total_tokens": 11989
+    },
+    "elapsed_ms": 5930.218696594238,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "核心配置（100万token语料、600 token窗口、1,669块、16GB虚拟机、281分钟）全部准确覆盖，虽补充了参考资料外的出处和LightRAG对比，但无实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 816,
+     "completion_tokens": 57,
+     "total_tokens": 873
+    }
+   }
+  }
+ },
+ {
+  "id": "q13",
+  "type": "semantic",
+  "text": "想在本机离线跑一个向量检索，选哪个库最省心？",
+  "gold": [
+   "chroma-0000",
+   "chroma-0004",
+   "chroma-0104"
+  ],
+  "arms": {
+   "single": {
+    "final": "本机离线、图省心 → 选 **Chroma**（备选 FAISS，只在极端在乎依赖体积时）。\n\n## 结论：Chroma\n\n**为什么最省心**：它是「AI 原生的 SQLite」——`pip install chromadb` 之后 `PersistentClient(path=\"./data\")` 就能落盘用，不需要起任何服务、不需要 Docker、不依赖外部组件；嵌入、元数据过滤、HNSW 索引合成一套 API，默认配置开箱即用，还自带默认嵌入模型（all-MiniLM-L6-v2，中文可换 BAAI/bge-base-zh-v1.5）。备份就是拷贝数据目录。适合原型、个人项目、中小型语义检索与 RAG，以及「随应用一起分发的离线场景」。^[raw/chroma.md]\n\n**为什么不是 Qdrant**：Qdrant 能力确实更全（量化、稀疏向量、多向量、payload 索引、分布式），但它是「像数据库一样扛生产流量」的定位，**没有嵌入式库模式**——`QdrantClient(path=\"./data\")` 和 `:memory:` 只是 SDK 便捷用法，不是 Chroma 那种随应用分发的嵌入式数据库；常规用法是 Docker 起服务。本机离线图省心时它属于过重方案，等有稀疏向量/地理过滤/量化压内存/分布式需求再换。\n\n**唯一的取舍点**：Chroma 没有稀疏向量，做不了单库双路混合检索（向量 + BM25），要混合就得另起一个 BM25 索引跨库融合；也没有原生阈值过滤，`n_results` 是取前 K 而非距离截断，阈值要在应用侧对 distances 二次筛。如果你的场景一开始就要混合检索或过滤条件复杂，那 Qdrant 的单库双路更省事，但代价是要跑服务。\n\n**一句话选型口径**：单机验证用 Chroma 或 FAISS，生产用 Milvus 或 Qdrant，已有 Postgres 且规模不大可上 pgvector 省一个组件（索引算法不如专用库丰富）。FAISS 的短板是 MIT 但无元数据、无分布式——只做纯向量近邻、不要过滤时它更轻；一旦需要元数据过滤和增删改，Chroma 更省心。\n\n**别忘了这两条红线**：入库与查询必须用同一嵌入模型（否则 Dimension mismatch）；批量写入分批（100–1000/批），用 upsert/update 增量更新，不要频繁全量重建；元数据字段要提前设计，否则后期加不上过滤条件。\n\n依据：[[entity/chroma]]、[[entity/qdrant]]、[[concept/rag-pipeline]]、[[source/chroma]]、[[concept/retrieval-selection]]",
+    "usage": {
+     "prompt_tokens": 32312,
+     "completion_tokens": 873,
+     "total_tokens": 33185
+    },
+    "elapsed_ms": 12179.85987663269,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-selection.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-selection.md\", \"lines\": \"1-50/50\", \"content\": \"---\\ntitle: 检索方案选型三步判定与混合治理\\ntype: concept\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-12\\nsummary: 先数页数、"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "嵌入式"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"entity/chroma.md:16 — - **嵌入式优先**：`chromadb.Client()` 内存模式、`PersistentClient` 落盘，无需独立服务。^[raw/chroma.md]\", \"entity/chroma.md:20 — - **可伸缩部署**：嵌入式 → `chroma run` 客户端-服务器 → Docker/K8s"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md",
+        "limit": "30",
+        "offset": "50"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"51-80/89\", \"content\": \"Embedding 同时作用于索引与查询两端，**两端必须同模型同预处理**，否则向量不在同一空间、结果等于随机。选型五看：MTEB 的 Retrieval 列（别拿分类聚类分选检索模型）、语言覆盖、维度（768–1024 为平衡点，3072 精"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案主选 Chroma 与参考资料一致，并正确覆盖开箱即用、嵌入式、默认配置等核心点；但额外引入了参考资料未提及的 FAISS、Qdrant、pgvector 对比以及嵌入模型、批量写入等大量外部内容，存在超出参考资料的扩展和轻微偏差。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1048,
+     "completion_tokens": 75,
+     "total_tokens": 1123
+    }
+   }
+  }
+ },
+ {
+  "id": "q14",
+  "type": "semantic",
+  "text": "Agent 长任务崩溃重启后，怎么避免重复扣款？",
+  "gold": [
+   "flow-control-0024",
+   "flow-control-0025",
+   "flow-control-0051"
+  ],
+  "arms": {
+   "single": {
+    "final": "**核心结论：检查点只解决“从哪继续”，不解决“只做一次”。因此，防重复扣款必须同时做两件事：靠检查点减少重做范围，靠幂等保证无论重做几次，扣款都只发生一次。**\n\n### 1. 先明确机制边界\n崩溃恢复本质是**重入整个节点**（而不是从断点处续行），重跑范围是节点、不是整张图。所以任何“扣款”动作只要落在会被重跑的节点里，就天然有被执行两次的风险。检查点保证“知道从哪继续”，幂等保证“副作用只发生一次”，两者缺一不可。^[raw/flow-control.md]\n\n### 2. 三个落地动作（按优先级）\n\n**① 扣款调用必须幂等（最关键，唯一直接解决扣款的手段）**\n- **幂等键**：每次扣款请求带一个业务唯一键（如 order_id + 步骤号），下游支付方按键去重。这是调用外部写接口的首选。\n- **先查后写**：有天然业务唯一键时，先查“这笔是否已扣”，存在则跳过。\n- **状态机**：只允许 `待支付 → 已支付` 单向迁移，重复执行无副作用，适合长流程。\n- 幂等注册表要记录“做过什么”，并把重复命中记入 dup 日志——目标是“重复副作用为 0，且有据可查”。D11 对照实验中，`crash@write_report`（外部写之后硬杀进程）基线必然重复副作用 1 次，加幂等副作用注册表后为 0，dup 记录留痕 1 次。^[raw/flow-control.md]\n\n**② 高风险动作放到 interrupt / 确认之后**\n原则是“低风险查询放确认之前，高风险写操作放确认之后”：查询重跑一次无害，扣款重跑一次就是事故。这也正是 interrupt 四条硬规则之四的来源——**interrupt 之前的副作用必须幂等**，因为恢复会重入整个节点。^[raw/flow-control.md]\n\n**③ durability 设为 `sync` + 状态存储可用**\n- `durability` 三档里，只有 `sync`（下一步开始前同步写完）适用于“钱、库存、不可重放的外部调用”；默认 `async` 可能丢最近一步，`exit` 直接中间态全无。\n- 存储上生产环境的默认配置是 PostgresSaver 这类“多进程能共享同一份存储”的方案，SqliteSaver 只算单机验证档。D11 同现场对照：`sync` 崩溃后重做 2 步，`exit` 硬杀后快照全无、整链重做 5 步。^[raw/flow-control.md]\n\n### 3. 重试纪律：不要用重试掩盖问题\n- **只对瞬时故障重试**（网络抖动、下游 429、超时）；永久故障（参数非法、鉴权失败）、语义故障（工具选错、参数指向错对象）、编排故障都不该丢进重试，否则只是延迟放大、账单上升。\n- 重试次数设上限、指数退避加抖动，**且重试前先判幂等**，非幂等操作不能盲目重试。\n- 补一层“同工具同参数重复调用检测”（检测阶段的现成手段），能及早发现“同一笔扣款又发了一次”。^[raw/flow-control.md]\n\n### 4. 验证方式\n演练注入两个关键点：**节点执行到一半杀进程**、**外部写接口超时**；看三个指标——恢复成功率、重做步骤数、**重复副作用次数**。前两个容易测，第三项最容易漏测，也是唯一造成真实损失的。用“扣款只扣一次且 dup 记录能查到”作为验收标准，而不是“恢复成功”。^[raw/flow-control.md]\n\n### 一句话口径\n> 用 `sync` 检查点把“重做范围”压到最小，用幂等键 + 先查后写把“重做次数”与扣款次数解耦，用 interrupt 之后才扣款把人的确认挡在钱前面，用只对瞬时故障重试的纪律避免主动制造重复。\n\n依据：[[concept/idempotency]]、[[concept/checkpoint-recovery]]、[[concept/agent-reliability]]、[[concept/interrupt-hitl]]",
+    "usage": {
+     "prompt_tokens": 24817,
+     "completion_tokens": 1161,
+     "total_tokens": 25978
+    },
+    "elapsed_ms": 13046.72884941101,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/checkpoint-recovery.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/checkpoint-recovery.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: 检查点与断点恢复：super-step、durability 与四类「停下」\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-0"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/agent-reliability.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/agent-reliability.md\", \"lines\": \"1-51/51\", \"content\": \"---\\ntitle: Agent 可靠性：四类失败、三道防线与重试纪律\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: Agen"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/interrupt-hitl.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/interrupt-hitl.md\", \"lines\": \"1-42/42\", \"content\": \"---\\ntitle: interrupt 四条硬规则与人机协同（HITL）\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: inter"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖参考资料的核心要点（幂等键、先查后写、状态机、检查点不保证恰好执行一次的边界），并围绕防重复扣款给出可落地的方案，无实质错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1248,
+     "completion_tokens": 58,
+     "total_tokens": 1306
+    }
+   }
+  }
+ },
+ {
+  "id": "q15",
+  "type": "semantic",
+  "text": "怎么让用户看到模型答案是从哪份资料的哪一段来的？",
+  "gold": [
+   "kb-rag-0032",
+   "rag-total-0058",
+   "rag-total-0063"
+  ],
+  "arms": {
+   "single": {
+    "final": "要做「让用户看到答案来自哪份资料的哪一段」，需要在链路末端做好「可溯源」，可归成五件事：\n\n## 一、入库端：块必须自带定位元数据（前提）\n引用能不能指到「哪一段」，取决于块里有没有可回指的坐标。每块的元数据必须写：**来源文档、页码、章节路径、文档 ID**——引用溯源与元数据过滤都靠它；不带元数据是分块五个坑之一（「命中后说不出来源」，事后补不回来）。^[concept/rag-pipeline.md]\n\n## 二、切分端：切法本身要能说出处\n按结构切分能明确说出「出自第三章第二节」，但依赖解析质量；父子文档 / 分层索引要保留子块→父块的映射，才能在展示时给「段」而不是「碎片」。表格要整表成块或按行切且每行重复表头，否则未来高亮定位会错位。^[concept/rag-pipeline.md]\n\n## 三、检索端：output_fields 带正文与来源\n建库/查询时 `output_fields` 必须带正文与来源字段，否则命中后还要回查一次数据库才能展示出处。^[concept/rag-pipeline.md]\n\n## 四、组装与生成端：编号 + 强约束提示词\n- 上下文组装时每段带编号与出处（「来源编号」是组装四件事之一）；\n- 提示词写死「只依据资料 / 没有就说没有 / **每句标编号**」；\n- 注意：模型会引用不存在的编号，这本身是幻觉的一种，所以编号要与上下文里实际存在的那批做校验。^[concept/rag-pipeline.md]\n\n## 五、产品端与运维端：可点、可查、可降级\n- 维护 **chunk↔原文页码映射**，前端做高亮/跳转；金融、ESG 等严谨场景必须可核查，代价是额外维护映射。^[concept/rag-pipeline.md]\n- 检索服务挂掉降级为纯生成时，要**明确告知这次没有引用**（不能伪装成有据可依）。^[concept/rag-production.md]\n- 答案被质疑时用 **trace 回查当时召回了哪些块**；审计记「谁问的、问了什么、召回了哪些文档、答案是什么、耗时多少」。^[concept/rag-production.md]\n- 引用是否合规可做自动校验（引用编号是否存在、是否带来源）——这正是规则匹配类评估能自动化查的客观项。^[answers/answer-rag-eval-metrics]\n\n## 六、混合形态下还要标「出处类型」\n如果同时有 Wiki 页与原始检索两条通路，回答要注明结论来自「审核过的页面」还是「原始检索」，否则混合只是拼接、溯源口径不可信。^[concept/retrieval-selection]\n\n**一句话落地版**：解析/切分阶段就把来源+页码+章节塞进块元数据 → 检索时把正文与来源一起 return → 组装时给每段编号 → 提示词强制每句标编号并做编号存在性校验 → 前端用 chunk↔页码映射做高亮跳转 → 后台 trace 与审计留召回明细 → 无引用时显式告知。\n\n依据：[[concept/rag-pipeline]]、[[concept/rag-production]]、[[concept/retrieval-selection]]、[[answers/answer-rag-eval-metrics]]",
+    "usage": {
+     "prompt_tokens": 23170,
+     "completion_tokens": 950,
+     "total_tokens": 24120
+    },
+    "elapsed_ms": 11183.376789093018,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "引用",
+        "limit": "10"
+       },
+       "read_page": {
+        "path": "concept/retrieval-selection.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:38 — - **规则匹配**：客观可重复，只能查精确项——引用编号是否存在、是否带来源、是否拒答、格式是否合规。\", \"concept/interrupt-hitl.md:14 — 3. **payload 要简单可序列化**：不塞自定义对象与大块二进制；只放审批要用的信息（做什么、影响什",
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-selection.md\", \"lines\": \"1-50/50\", \"content\": \"---\\ntitle: 检索方案选型三步判定与混合治理\\ntype: concept\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-12\\nsummary: 先数页数、"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖参考资料中chunk↔原文映射、来源编号、提示词强制标编号、编号存在性校验、前端高亮跳转、trace回查等核心要点，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1221,
+     "completion_tokens": 57,
+     "total_tokens": 1278
+    }
+   }
+  }
+ },
+ {
+  "id": "q16",
+  "type": "semantic",
+  "text": "用户提问和文档里的用词差得很远，召回不准怎么办？",
+  "gold": [
+   "kb-rag-0026",
+   "kb-rag-0036",
+   "rag-total-0029"
+  ],
+  "arms": {
+   "single": {
+    "final": "问题的本质是**查询端和文档端用了两套词**（查询—文档词汇不匹配），不是 Embedding 换了就好。按「先补词表漏、再补语义、最后补结构」的顺序处理，成本从低到高，别一上来就换模型：\n\n## 0. 先确认是「词汇不匹配」还是别的\n\n先按 [[concept/rag-production]] 的排查顺序走：**先看检索有没有捞到证据，再看生成有没有用证据，最后看组装有没有把证据挤掉**。顺序反了会在提示词上反复调，而问题其实在切分或词表。\n\n具体自测：抽二十对「问题—应该命中的片段」看 Top-5 命中率；低于六成先怀疑 Embedding/词表，再怀疑切分。如果命中率不低但答案还是不对，那问题在生成侧，跟用词差距无关。\n\n## 1. 最便宜第一招：混合检索 + RRF（补精确串）\n\n**向量管语义改写、BM25 管精确串**，这一层正是为「用户说的和文档写的不一样」准备的：用户说「不想要了要退钱」，文档写「退款申请流程」，向量管这种改写；用户说「SOC2」而文档写「SOC 2 Type II」，BM25 管精确串。两路用 RRF 融合（只看名次，绕开两路量纲不同，不用归一化；k 不是准确率旋钮，只改名次衰减速度）。\n\n注意失效边界：中文分词不补专有词时，BM25 对业务黑话基本无效——需要领域词典或字符级 BM25。若语料全是同义改写型问法、几乎没有精确串，BM25 增量接近零，别指望它救场。\n\n## 2. 第二招：查询侧改写（最便宜、收益最稳）\n\n查询侧加工的判断顺序是 **先改写 → 再拆分 → 最后 HyDE**：\n\n- **改写**：用 LLM 把口语化提问改写成文档可能的措辞，并补全多轮缺失的主语。多轮场景先做指代消解/独立查询改写（工程默认，多一次模型调用），否则「它」「那个」本身就歧义，跟词汇匹配没关系。\n- **拆分**：复合问题拆成多个子查询分别检索再合并。\n- **HyDE**（先让模型编一段假设答案，用它去检索）：收益大、风险也大——编歪了就往错方向召回，放最后。\n\n## 3. 第三招：精排把「像」变成「对」\n\n粗排是一维的（两边零交互，只比距离），精排是二维的（逐 token 互 attend，比关系）。所以前面的召回放大到 top-50 起、再由交叉编码器收敛到 3~8 条进 prompt。**有 Rerank 才能放大 K；没有就放大，会直接掉准确率。** 本地 bge-reranker-v2-m3 可控但要 GPU；云 API 省事但有候选数上限。注意：召回阶段没捞出来的，精排救不回。\n\n## 4. 第四招：索引期给块补上下文（治「块本身没说清是谁」）\n\n用词差距大时，块里常常连主语都没了——一块写着「该条不适用于上述情形」，谁也匹配不上。[[entity/contextual-retrieval]] 就是在索引时给每块补 50–100 token 位置说明（文档叫什么、哪一章、这段在讲谁），三个做法（位置说明、上下文 BM25、rerank）可叠加，top-20 失败率 5.7% → 3.7% → 2.9% → 1.9%，**报 1.9% 必须说明是三者齐上**。代价：一次性约 $1.02/百万 document token，且依赖 prompt caching；官方测英文语料，中文要重测；补不了块间关系。\n\n## 5. 第五招：把「用户词表」沉到索引里（治长期的黑话差距）\n\n- 给每块加**元数据**：别名、同义词、业务黑话映射，命中时一并参与过滤/扩写；也可按领域词典做查询扩展。注意中文专名被切碎、全角半角归一这些前置清洗。\n- 让模型**微调 Embedding**：对比学习三元组，正样本取「真正能回答的片段」而不是主题相近的片段，负样本取语义相近但不相关的（正负比 1:4~1:9）。代价是模型与索引绑定、换模型必须整库重建。\n- 语料本身值得整理时，**用整理过的 Markdown 建向量库明显好于拿原始 PDF**（Wiki 反哺 RAG，融合四条路里见效最快的一条）。\n\n## 6. 如果差距是结构性的：换检索形态\n\n- 答案散在相隔几十页的多章节、常漏前置条件 → [[entity/document-tree-navigation]] 多步阅读（当副手，延迟高）。\n- 需要「这批材料整体主题是什么」→ [[entity/graphrag]]（语料须静态、建图贵）。\n- 知识少而精、且有负责人审核 → [[entity/llm-wiki]] 编译成页面，Wiki 命中优先、向量兜底。\n- 注意一个反直觉的数字：LLM-Wiki 只靠目录选页命中 70.0%，加 BM25 到 92.7%——**编译没消灭检索，词汇匹配那层永远得补**。\n\n## 落地顺序（按性价比）\n\n1. 建 20 对「问题—应命中片段」的对照集，量化当前 Top-5 命中率；\n2. 上混合检索（向量 + BM25 + RRF），中文先补领域词典；\n3. 查询改写（先改写、多轮先消解指代）；\n4. 加交叉编码器精排，同时把粗排 K 放大；\n5. 补 Contextual Retrieval 的位置说明；\n6. 仍不够再动 Embedding 微调或换检索形态。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]、[[concept/rag-production]]、[[entity/contextual-retrieval]]、[[concept/retrieval-paradigm]]、[[concept/retrieval-selection]]",
+    "usage": {
+     "prompt_tokens": 37297,
+     "completion_tokens": 1657,
+     "total_tokens": 38954
+    },
+    "elapsed_ms": 15301.934242248535,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/contextual-retrieval.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/contextual-retrieval.md\", \"lines\": \"1-26/26\", \"content\": \"---\\ntitle: Contextual Retrieval（上下文检索）\\ntype: entity\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-11\\nsum"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖参考资料的核心要点（混合检索+BM25+RRF补精确串、查询改写/HyDE、精排、Contextual Retrieval、元数据/词表、Embedding微调边界），并正确引用20对对照集与Top-5六成阈值等细节，无实质性编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1832,
+     "completion_tokens": 78,
+     "total_tokens": 1910
+    }
+   }
+  }
+ },
+ {
+  "id": "q17",
+  "type": "semantic",
+  "text": "手头只有几百页资料，要不要上 GraphRAG？",
+  "gold": [
+   "kb-rag-0034",
+   "rag-total-0098",
+   "retrieval-paradigm-0016"
+  ],
+  "arms": {
+   "single": {
+    "final": "# 手头只有几百页资料，该不该上 GraphRAG？\n\n**结论：不该。按知识库规模选型的判断规则，不到 500 页根本不该做 RAG，更不该上 GraphRAG。**\n\n## 一、规模判定规则卡在第一步\n\n这个 wiki 给出的选型判断分成三步，**顺序不可换：先数页数，再看问题形态，最后看知识性质**。\n\n第一步的要求是：知识库 < 200,000 token（约 **500 页**）时，整库塞进上下文即可，不做 RAG（Anthropic 官方判断标准）。你「几百页」的资料大概率落在这一档，所以后面两步——问题形态、知识性质——实际还轮不到它们来决定。^[raw/retrieval-paradigm.md]\n\n唯一例外：如果你需要一个**可审核的编译产物**，比如每份资料留痕、有负责人负责，那就不是选图，而是选 LLM-Wiki；它的适用规模也在「几百页内且有负责人审核」。\n\n## 二、就算过了 500 页，GraphRAG 也只对一种问题成立\n\nGraphRAG 真正解决的**不是多跳**，而是「这批材料的主题是什么」这类**全局归纳、摘要型问题**：答案不在任何一块里，需要索引时抽实体建图、按关系密度聚成社区、每圈预写摘要（社区摘要相当于物化视图）。^[raw/retrieval-paradigm.md]\n\n如果问题形态是单跳事实型，GraphRAG 反而更差：论文自己承认**单跳细节型问题上向量 RAG 更强**，而 GraphRAG 相对向量检索是纯增量投入，只在「把全文塞进上下文」这件事上省钱。\n\n代价方面，实测数字（约 100 万 token 语料、600 token 窗口、16GB 虚拟机）：**建图 281 分钟**，全局查询 20 秒起步、单次读几十万 token，而且**语料必须静态**——数据一更，社区划分就变、摘要整批作废。图类方案的成本几乎全落在「重建」而非查询，计算时要按「抽取 token 量 × 单价 × 预计重建次数」评估。^[raw/retrieval-paradigm.md]\n\n## 三、别用错理由，也别急着换 LightRAG\n\n- ❌「GraphRAG 仓库停维护了」——**这个理由不成立**：microsoft/graphrag 未归档、2026-11-09 仍有推送、README 无维护模式声明。正当理由只有两个：「不到 500 页」或「问题不是全局归纳类」。^[raw/retrieval-paradigm.md]\n- ⚠️ 「那换 LightRAG 吧」——它解决的是 **GraphRAG 自己造成的重建贵问题**（节点/边取并集做增量 INSERT），但**首建同样贵**（「首建便宜」是误解），对 GraphRAG Overall 胜率 54.8/52.0/52.8/**49.6**，第四个领域是输的，「全面超越」不成立。你连图都不该建的场景，换轻量图也一样不该建。^[raw/retrieval-paradigm.md]\n\n## 四、几百页该怎么做（按性价比排序）\n\n1. **整库塞上下文**：最省事，符合 <500 页判断标准。适合作答型/问答型需求，注意长上下文成本随轮次线性涨。\n2. **向量 RAG + rerank**：需要可查索引、覆盖广、知识天天变时选它；如果检索常漏、块里缺主语，加 **Contextual Retrieval** 这个索引期补丁（三者齐上可把 top-20 失败率从 5.7% 降到 1.9%，一次性约 $1.02/百万 document token），比重建图便宜一两个量级。^[raw/retrieval-paradigm.md]\n3. **LLM-Wiki（若资料少而精、需要审核留痕）**：甜区正是几百页内 + 有负责人。但记住编译没消灭检索——只靠目录选页命中 70.0%，加 BM25 才到 92.7%，所以稳妥解是 **Wiki 命中优先、向量兜底**，并标注结论出自「审核过的页面」还是「原始检索」。^[raw/retrieval-paradigm.md]\n4. **答案散落在相隔几十页的多个章节** → 用文档树导航当副手，别用图。\n5. **真到了上千页且问题是全局归纳型** → 再考虑 GraphRAG，并且**当方法论不当基础设施**（先按图思路手工/半自动做主题归纳，验证问题形态真的需要它再上工程）。\n\n## 一句话回答\n\n**几十万页才谈图。几百页的正确动作是「塞上下文 / 向量 RAG + 重排 / 必要时编 Wiki」，上 GraphRAG 属于用建图 281 分钟的代价，去回答一个本来能在上下文里直接回答的问题。**\n\n依据：[[concept/retrieval-selection]]、[[entity/graphrag]]、[[concept/retrieval-paradigm]]、[[entity/lightrag]]",
+    "usage": {
+     "prompt_tokens": 18617,
+     "completion_tokens": 1333,
+     "total_tokens": 19950
+    },
+    "elapsed_ms": 12338.081121444702,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/graphrag.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/graphrag.md\", \"lines\": \"1-30/30\", \"content\": \"---\\ntitle: GraphRAG\\ntype: entity\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-11\\nsummary: 把摘要从查询时临场发挥改为索引时预计算：抽实体建图"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/lightrag.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/lightrag.md\", \"lines\": \"1-32/32\", \"content\": \"---\\ntitle: LightRAG\\ntype: entity\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-11\\nsummary: 针对 GraphRAG 重建贵的问题，用节点/边并"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料核心结论（不到500页别上、先数页数再看问题形态与知识性质、GraphRAG建图281分钟等硬数字），并围绕全局归纳类问题、重建代价等要点展开，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1711,
+     "completion_tokens": 66,
+     "total_tokens": 1777
+    }
+   }
+  }
+ },
+ {
+  "id": "q18",
+  "type": "semantic",
+  "text": "切块的时候怎么保护表格和代码块不被切断？",
+  "gold": [
+   "kb-rag-0006",
+   "kb-rag-0022",
+   "rag-total-0023"
+  ],
+  "arms": {
+   "single": {
+    "final": "带表格和代码块的文档，分块时可以采用三层手段叠加：解析阶段保住块内结构，切分阶段不让边界穿过结构，入库阶段补齐块外语义。\n\n## 一、根因判断\n\n解析与切分决定检索上限，重排只能在已入库的候选里挑；因此，解析时如果把表格压成一行，后面再换 Embedding 也没有用。切分前必须先确认解析出来的表格边界、代码块边界仍然存在，否则任何切分策略都无法补救。\n\n## 二、解析阶段：先把结构保留下来\n\n- **表格**：使用带版面识别的解析器。MinerU Hybrid（本地 Pipeline 解析版面，复杂页交给 Qwen-VL VLM）还原表格和图文混排的效果最好，代价是外部 API 的成本与延迟；扫描件用 PaddleOCR 注入原链路。提取 HTML/Word 正文时要当心：代码块与表格最容易被压平。\n- **代码块**：抽取正文时保留 `<pre>`、`<code>` 等结构标记；清洗阶段只做三件事，不能顺手删光结构标记，这三件事是去掉页眉页脚与页码、合并被换行切断的句子、保留标题层级等结构标记。代码块里几乎每个换行都有意义，所以“合并断行”这条规则不适用于代码块。\n- **跨页表格**：中文语料的一个特殊问题是，表格跨页时要用续表标识合并，否则同一张表会被拆成两块。\n- **验收**：抽取五张表，看表头和数据是否落在同一块里；抽取二十页，看正文是否连续、有没有串栏，并把代码块是否被压平也一并检查。不验收就入库，是后续“召回不准”的根源。\n\n## 三、切分阶段：三条具体做法\n\n1. **按结构切分**：首选“按结构切分”，以标题层级和表格、代码块作为天然分块边界，好处是能说出“出自第三章第二节”，也为指标对齐和历史溯源提供依据。也可以按 [[source/kb-rag]] 的做法，自研结构感知 NodeParser（如 ESGStructureAwareNodeParser），由切分器直接识别表格与代码围栏，禁止切点落在它们内部；代价是要针对具体场景定制实现。\n2. **表格二选一**：要么整张表作为一个块，保证指标能对齐、不错行；要么按行切分，但每行都重复表头，并把表名与列名写进块文本。这样一来，即使用户只搜某一列的值，也能召回所在表的结构。\n3. **代码块整体成块**：一个代码块，加上它上面的标题和一句功能说明，作为一个块，不要跨块切断；超长代码可以按函数或类切分，但每块都要带上所在文件、语言和函数名等元数据。追根究底，这也是“父子文档 / Small-to-Big”的用法：小块负责检索求准，大块负责生成求全。\n\n**与其他规则的冲突处理**：递归字符切分会按段落、换行、句号、空格逐级降级，这是工程默认做法，但在代码块里，换行切分点会命中每一行。因此，必须在递归之前把表格和代码块替换成不可切的占位符；等超长块需要二次拆分后，再把它们还原。滑动窗口的 overlap（50–100 token，约 10%）只对普通文本生效，不要跨表格行重叠，否则表头会重复错位。\n\n## 四、入库阶段：把语义信息补充完整\n\n- 块内元数据必须带上来源、页码、章节路径、文档 ID，以及表名和列名（表格）、文件路径和语言（代码）。\n- chunk 与原文之间做映射（表格到表格 ID、代码块到行号区间），前端才能高亮跳转；金融与 ESG 这类严谨场景必须能够核查。\n- 如果某一块因为独立成段而缺少主语，可以补上 Contextual Retrieval 的 50–100 token 位置说明（“此表出自 2023 年报第三节”）。\n\n## 五、参数与常见错误\n\n- chunk size 取 512–1024 token、overlap 取 50–100 token、每块至少 100 字；**按文档类型分组配置参数**，技术文档的块偏小以保证精度，法规合同则偏大以保证完整。全库共用一套参数必然导致合同被切碎、网页留大块。\n- 典型错误三条：表格被切断（行与表头分家）、用固定长度切分把代码块切得支离破碎、块不带元数据（命中后说不出来源）。\n- 需要验证时，可以看 D06 结构切分实验的三个指标：证据完整率、引用定位正确率、索引体积。结构保护的代价是索引体积增大（整表成块会变大，父块加小块则会翻倍），收益要一起记。\n\n一句话：**表格整表成块或按行切并重复表头，代码块按块不切开，切分器必须在解析保留的结构边界上停止；三者缺一，后面的 rerank 都救不回。**\n\n依据：[[concept/rag-pipeline]]、[[source/rag-total]]、[[source/kb-rag]]",
+    "usage": {
+     "prompt_tokens": 26975,
+     "completion_tokens": 1278,
+     "total_tokens": 28253
+    },
+    "elapsed_ms": 12423.595428466797,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"1-88/88\", \"content\": \"---\\ntitle: 文档处理与 RAG 完整正文（原文摘要）\\ntype: source\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 十九章 RAG 总纲的压缩摘要：定义与适用"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/kb-rag.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/kb-rag.md\", \"lines\": \"1-70/70\", \"content\": \"---\\ntitle: 文档处理与 RAG 主题总览（问答清单 + 方案取舍）\\ntype: source\\nsources: [raw/kb-rag.md]\\nupdated: 2026-11-12\\nsummary: 一份把 RAG 问题清单、六种检索形态速"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖了保护表格和代码块的核心手段（解析保留结构、结构感知切分、表格整表成块或按行重复表头、代码块整体不切开、占位符防止递归切断、元数据补齐），与参考资料中结构感知切分、chunk/overlap 参数等要点一致，无编造内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1674,
+     "completion_tokens": 85,
+     "total_tokens": 1759
+    }
+   }
+  }
+ },
+ {
+  "id": "q19",
+  "type": "semantic",
+  "text": "多个知识库之间怎么隔离，避免低权限用户问到高权限内容？",
+  "gold": [
+   "kb-rag-0010",
+   "kb-rag-0031",
+   "rag-total-0045"
+  ],
+  "arms": {
+   "single": {
+    "final": "# 多知识库隔离与越权检索防护\n\n## 一句话结论\n\n**隔离的核心是让每次检索请求都自带「谁在问」：每块带权限元数据、先过滤再检索。分层建库（分 collection 或分实例）只是强隔离兜底，不是默认解。**\n\n## 一、为什么不能靠「事后筛」\n\n低权限用户问到高权限内容，属于 RAG 四道安全边界里的「越权检索」。如果让向量库先做 top-K、再在应用层筛掉无权限的块，高权限内容就已经被读进了服务进程，甚至已经进入模型上下文；过滤必须作为检索请求的一部分下发，在候选集生成之前生效。\n\n## 二、四个落地层次\n\n| 层次 | 做法 | 适用 | 代价 |\n|---|---|---|---|\n| **元数据过滤（推荐默认）** | 每块写入 `tenant/部门/密级/owner` 权限字段，查询时带 must 条件 | 绝大多数「多库、多租户」场景 | 依赖入库时元数据不漏 |\n| 分组路由 | 按租户或知识域分 collection / payload 分区，查询前先选库 | 各库语义隔离、生命周期不同 | 跨库统一检索要额外融合 |\n| 强制隔离（强兜底） | 一租户一实例或一 collection + 独立 API Key | 涉密、合规审计要求高 | 运维与成本随库数线性增长 |\n| 输出与日志兜底 | 输出侧脱敏、审计日志脱敏 | 所有场景都要有 | 不能替代权限控制，只防泄露扩散 |\n\n向量库侧的具体落法（以 Qdrant 为例）：payload 过滤与 HNSW 深度集成（「过滤即搜索」），`Filter` 的 `must/should/must_not` + `MatchValue`/`MatchAny`，可以把「用户所属部门 ∈ 文档可读范围」直接压进搜索请求；payload 索引（KEYWORD 等）让这种过滤不必退化成全量扫描。Chroma 侧则是元数据 `where` 过滤，能力对等但生产特性弱一档。\n\n## 三、三个必踩的坑\n\n1. **元数据缺失即不可见（fail-closed）**。必须定成：无权限字段的块不参与检索。否则新接入的文档会整批泄漏——这是最典型的翻车方式。\n2. **多形态融合时权限要同步失效**。同一条知识在片段、图节点（GraphRAG/LightRAG）、文档树、Wiki 页各存一份，源内容或权限一改，四处都要同步。这是融合方案最常被低估的治理成本，所以权限字段必须**源头单点定义，编译产物只继承**。\n3. **读权限 ≠ 动作权限**。若系统还带写操作/Action，除读权限外还要分别授权「允许改本体结构」与「允许执行业务动作」；MCP 只给调用接口，授权仍要服务和平台落实。\n\n## 四、配套：审计与脱敏\n\n- 审计记五件事：谁问的、问了什么、召回了哪些文档、答案是什么、耗时多少；**审计日志本身也要脱敏**，否则变成新的泄露源。\n- 脱敏放两处：入库前一次、输出前一次。只做一处，换个入口就漏。\n- 有 trace 才能事后回查「某低权限账号是否真的召回过高权限文档」——这是验证权限规则唯一生效的手段。\n- 权限过滤一旦上线，要盯监控：命中率异常下跌可能意味着过滤条件写错（把该看的也拦了），拒答率异常上涨同理。\n\n## 五、选型判断流\n\n- 库之间**语义/生命周期无差别**、只是可见范围不同 → 单库 + 权限元数据过滤，别拆库。\n- 库之间**语义隔离或生命周期不同**（不同业务域、不同更新节奏）→ 分 collection + 查询前路由。\n- **涉密/合规审计**要求「物理上不可达」→ 一租户一实例 + 独立凭据，接受运维成本线性增长。\n- 无论哪档，输出脱敏、审计、fail-closed 三条都要有。\n\n> 口径：**隔离不是把库拆开，而是让每次检索都自带「谁在问」；先过滤再检索，元数据缺失即不可见；分库分实例只在合规压力下当兜底。**\n\n依据：[[answers/answer-multi-kb-isolation]]、[[concept/rag-production]]、[[entity/qdrant]]",
+    "usage": {
+     "prompt_tokens": 19018,
+     "completion_tokens": 1145,
+     "total_tokens": 20163
+    },
+    "elapsed_ms": 10019.814491271973,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/qdrant.md\", \"lines\": \"1-62/62\", \"content\": \"---\\ntitle: Qdrant（Rust 编写的高性能向量数据库）\\ntype: entity\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Apache 2.0 的开源向量数据库，Rus"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案覆盖了参考资料的核心要点：三种隔离做法（独立collection、命名空间/分组路由、元数据过滤）及其隔离强度与代价，并强调先过滤再检索、元数据缺失即安全失败（fail-closed）、强隔离作为合规兜底，无实质性编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1358,
+     "completion_tokens": 71,
+     "total_tokens": 1429
+    }
+   }
+  }
+ },
+ {
+  "id": "q20",
+  "type": "semantic",
+  "text": "粗排召回的结果看起来像但不够准，怎么再提一档？",
+  "gold": [
+   "kb-rag-0028",
+   "rag-total-0052",
+   "kb-rag-0027"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：你这句「看起来像但不够准」，本质是粗排（一维双塔）只能判「像不像」，无法判「条件成不成立」。提升有一档明确的主线，顺序不能反：先补召回，再加精排，最后才动生成。**\n\n下面按「收益/成本」排序，共五档。\n\n## 0. 先确认问题出在哪一段（不然会白花力气）\n\n按固定顺序排查：**先看检索有没有捞到证据，再看生成有没有用证据，最后看组装有没有挤掉证据**。反着来就会在提示词上反复调，而问题其实在切分。\n\n最有信息量的一步是：抽 20 对「问题—应命中片段」，看这份标准片段是否进过 top-50。**没进 = 召回问题（切分/解析/Embedding）；进了但排在后面 = 重排问题。** 这一条决定后面所有投入的方向。\n\n依据：[[concept/rag-production]]、[[concept/rag-pipeline]]\n\n## 1. 上两段式 Top-K：这是最便宜的一档\n\n现在的问题很可能是把「召回用的 K」和「进 prompt 的 K」当成同一个数了。正确做法是：\n\n- 粗排放大到 top-50（起步值），再精排收敛到进 prompt 的 3~8 条。\n- 关键判断：**有 rerank 才能放大 K；没有 rerank 就直接放大 K，准确率会掉。** 所以这两件事必须绑在一起做。\n\n依据：[[concept/hybrid-retrieval]]\n\n## 2. 上交叉编码器精排：把「像」变成「对」\n\n这是对「像但不准」最直接的治疗。\n\n- 粗排是一维的：query 和文档各压成一个向量，只比一条轴上的距离，**两边零交互**；向量维度拉多高都只是把同一条轴拉长。\n- 精排是二维的：query 与文档拼成一条序列进同一模型，token 之间互相 attend，比的是**关系**不是距离——这样才能判断「这个条件成不成立」。\n\n三条路选型：\n| 路线 | 准度 | 成本 |\n|---|---|---|\n| 双塔粗排（你现在） | 低 | 全库毫秒级 |\n| cross-encoder 精排 | 高 | 逐对现场前向，不进索引，百 ms 级 |\n| late interaction（ColBERT 类） | 近精排 | 近粗排 |\n\n实现三选一：不做 / 云 API（省事但有候选数上限与网络依赖）/ 本地 BGE（可控但要 GPU；bge-reranker-v2-m3 上限 8192 token，但推荐训练长度只有 1024，更早的 base/large 是 512）。候选数超重排上限要先截断。\n\n**工程上必须留降级**：重排超时就跳过精排、直接用粗排结果，一个超时不该打断整条链路。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-production]]\n\n## 3. 修「召回没捞到」的那部分：重排救不回没被召回的\n\n如果第 0 步发现标准片段压根没进候选，**精排一点用没有**。按这个顺序查：\n\n1. **解析**：表格塌成一行、双栏串行、扫描件空白——解析错则后面全错且不可补救。验收三条：抽 20 页看正文连续与串栏、抽 5 张表看表头与数据是否同块、抽 3 个扫描页看 OCR 错字率。\n2. **切分**：表格被切断、全库一个参数、块过长或过短。参数按文档类型分组；父子文档/Small-to-Big（小块检索求准、大块生成求全）尤其对症「像但不够」。\n3. **混合检索**：加 BM25 一路 + RRF 融合，专治专有词、业务黑话、编号型查询。RRF 的 k 不是准确率旋钮，调它只改变名次衰减速度（k=60 是社区经验值）。\n4. **Embedding**：先看领域失配（比维度不足更常见）。微调代价是模型与索引绑定、换模型必须整库重建。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]\n\n## 4. 给每块补「它自己是谁」：Contextual Retrieval\n\n索引期给每块补 50–100 token 的位置说明（属于哪章、这段在讲谁）。补的是切块时丢掉、**检索期调权重也补不回来的信息**。\n\n官方数字（Anthropic 2024-09-19，英文语料）：top-20 失败率 5.7% → 3.7%（仅上下文嵌入）→ 2.9%（+上下文 BM25）→ **1.9%（+rerank，三者齐上）**。报 1.9% 时必须说明是三件齐上。一次性成本 $1.02 / 百万 document token，且必须靠 prompt caching 才成立；中文需重测。\n\n注意它是**补丁不是路线**，补不了块与块之间的关系。\n\n依据：[[entity/contextual-retrieval]]\n\n## 5. 如果问题是「多跳 / 跨章节 / 全局归纳」，上面都只是微调\n\n单条打分本身就不够，需要换形态：查询拆分（先把复合问题拆开）、文档树导航（章节为检索单元、模型选章读原文）、GraphRAG（预建实体图与社区摘要，治「整体主题是什么」，但建图贵且语料必须静态）。\n\n依据：[[concept/rag-pipeline]]、[[concept/retrieval-paradigm]]\n\n## 成本与优先级一句话\n\n**先 1+2（Top-K 两段式 + rerank），这是「提一档」；再 3（查解析/切分/混合）；再 4（Contextual Retrieval）；5 只在问题形态确实需要时做。**\n\n别踩的坑：① 无 rerank 就放大 K；② 把力气全花在换 Embedding 上，而解析把表格切碎了；③ 只加不删导致新旧两版一起被召回；④ 召回没捞到的指望重排救回。另外留意「答案有编造」不一定是检索问题——可能是提示词缺「只依据资料」，那属于另一条支线。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]、[[concept/rag-production]]、[[entity/contextual-retrieval]]",
+    "usage": {
+     "prompt_tokens": 23165,
+     "completion_tokens": 1654,
+     "total_tokens": 24819
+    },
+    "elapsed_ms": 13324.233770370483,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了资料核心要点（一维/二维差异、补召回→加精排的主线、RRF融合、重排三条路、没召回的救不回、重排代价边界），且额外扩展内容属合理工程建议，无实质错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 2288,
+     "completion_tokens": 70,
+     "total_tokens": 2358
+    }
+   }
+  }
+ },
+ {
+  "id": "q21",
+  "type": "exact",
+  "text": "Chroma 支持哪三种 distance_metric？",
+  "gold": [
+   "chroma-0006"
+  ],
+  "arms": {
+   "single": {
+    "final": "Chroma 支持三种距离度量（`hnsw:space`）：\n\n| 度量 | 说明 | 适用场景 |\n|---|---|---|\n| **L2**（欧氏距离，默认） | 未指定时使用 | 通用默认 |\n| **IP**（内积） | 向量已归一化时接近余弦 | 归一化向量的相似度 |\n| **Cosine**（余弦距离） | 只看夹角不看模长 | 文本语义搜索（常配 bge 等归一化嵌入） |\n\n补充要点：\n- 底层实现为 HNSW 近似最近邻，可用 `hnsw:space` 指定度量，并用 `hnsw:M` / `ef_construction` / `ef_search` 调精度与速度。\n- Chroma 没有原生的距离阈值参数，`n_results` 是取前 K 而非按距离截断，需要阈值时须在应用侧对返回的 `distances` 二次筛选。\n- 与 Qdrant 的四种度量（Cosine / Euclid / Dot / Manhattan）相比，Chroma 少了 Manhattan。切换度量需新建 collection，且入库与查询必须用同一嵌入模型。\n\n依据：[[entity/chroma]]、[[source/chroma]]",
+    "usage": {
+     "prompt_tokens": 16632,
+     "completion_tokens": 421,
+     "total_tokens": 17053
+    },
+    "elapsed_ms": 6684.415102005005,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/chroma.md"
+       },
+       "search_wiki": {
+        "query": "distance"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/chroma.md\", \"lines\": \"1-46/46\", \"content\": \"---\\ntitle: Chroma（开源 AI 原生嵌入数据库）\\ntype: entity\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Apache 2.0 的开源向量数据库，主打「像 S",
+       "search_wiki": "OBSERVE {\"hits\": [\"entity/chroma.md:28 — 写入侧 `add` / `update` / `upsert` 支持传入预计算 embeddings 跳过内置嵌入；`get` 支持 where、limit/offset 分页与 include 选字段。查询侧可传 `query_texts\", \"entity/chroma.md:30 — 删除支持按 id、按 wh"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/chroma.md"
+       },
+       "search_wiki": {
+        "query": "Cosine"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/chroma.md\", \"lines\": \"1-48/48\", \"content\": \"---\\ntitle: Chroma 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Chroma 的定位、核心概念、嵌入系统、CRUD",
+       "search_wiki": "OBSERVE {\"hits\": [\"entity/chroma.md:19 — - **HNSW 近邻索引**：距离度量 L2（默认）/IP/Cosine，可用 `hnsw:M`、`ef_construction`、`ef_search` 调精度与速度。^[raw/chroma.md]\", \"entity/qdrant.md:27 — Collection → Point（id + vector"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖了参考资料中 Chroma 支持的 L2、IP、Cosine 三种距离度量，说明准确，补充内容为合理的扩展知识，无实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 580,
+     "completion_tokens": 46,
+     "total_tokens": 626
+    }
+   }
+  }
+ },
+ {
+  "id": "q22",
+  "type": "exact",
+  "text": "Chroma 的 where_document 里 $contains 和 $not_contains 是做什么的？",
+  "gold": [
+   "chroma-0046"
+  ],
+  "arms": {
+   "single": {
+    "final": "`$contains` / `$not_contains` 是 Chroma 查询里 **`where_document`** 参数支持的文档内容过滤操作符，用来对记录的原文 `document`（documents 字段的字符串）做**子串包含判断**，与按元数据过滤的 `where` 分工。\n\n具体要点：\n\n1. **语法位置**：写在 `where_document` 里，形如\n   ```python\n   collection.query(\n       query_texts=[\"...\"],\n       n_results=5,\n       where_document={\"$contains\": \"关键词\"},   # 只留 document 含该串的\n   )\n   ```\n   `$not_contains` 则反过来，只留 document **不含**该串的记录。`$contains` 是字面子串匹配（原文串），不理解语义，也不做分词。\n\n2. **与 `where` 的分工**：`where` 管的是 `metadata` 的结构化条件——比较（`$gt/$gte/$lt/$lte/$ne`）、逻辑（`$and/$or`，可嵌套）、集合（`$in/$nin`）；`where_document` 管的是**文档正文文本**层面的过滤（即 `$contains/$not_contains`）。两者可以同时使用，与向量近邻检索**在同一次查询里下推**，先过滤再取 Top-K，而不是先取回再在应用侧筛。\n\n3. **典型用途**：给语义检索加一层「精确串硬约束」——例如必须包含某个编号、产品名、法规条款号、报错码，或要把含某敏感词/免责声明的块排除掉；在 [[concept-hybrid-retrieval]] 语境里，它相当于在没有稀疏向量、没有 BM25 的情况下，用一个廉价的字面通道补一点「精确串」能力（但只是布尔筛，不给相关性打分，不能替代真正的关键词检索）。\n\n4. **边界提醒**：它是纯子串匹配，中文不分词、无同义词/改写能力；Chroma 也没有原生距离阈值参数（`n_results` 是取前 K 而非截断），所以「相关性」仍靠向量距离，`where_document` 只负责「必须有/必须没有这串字符」这一层布尔裁剪；另需注意它作用于 `documents` 原文，若入库时把正文另存 metadata，则不受其影响。\n\n依据：[[entity/chroma]]、[[source/chroma]]、[[concept/hybrid-retrieval]]",
+    "usage": {
+     "prompt_tokens": 11169,
+     "completion_tokens": 632,
+     "total_tokens": 11801
+    },
+    "elapsed_ms": 6984.08055305481,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/chroma.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/chroma.md\", \"lines\": \"1-48/48\", \"content\": \"---\\ntitle: Chroma 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Chroma 的定位、核心概念、嵌入系统、CRUD"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了 $contains/$not_contains 作为 where_document 中文档子串包含过滤操作符的核心要点，包括语法、与 where 的分工和边界说明，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 719,
+     "completion_tokens": 57,
+     "total_tokens": 776
+    }
+   }
+  }
+ },
+ {
+  "id": "q23",
+  "type": "exact",
+  "text": "Chroma 的 hnsw:M 和 hnsw:ef_construction 参数分别管什么？",
+  "gold": [
+   "chroma-0022",
+   "chroma-0082"
+  ],
+  "arms": {
+   "single": {
+    "final": "**Chroma 的 `hnsw:M` 与 `hnsw:ef_construction`**\n\n这两个参数都属于 Chroma 底层 HNSW 索引的构建参数，在创建 collection 时通过 `metadata` 传入，它们决定索引结构本身的形状。\n\n**`hnsw:M`：每个节点的邻居数，决定图的连通程度**\n- 含义：HNSW 图中每个节点保留的双向连接数（即每层邻居数上限）。M 越大，图的连通性越高、召回越好，但索引体积随 M 线性增长，写入也更慢；M 越小，越省内存、构建越快，但召回会下降。\n- 在检索阶段，M 还会制约可用的候选规模：HNSW 做搜索时可用候选数量本身受 M 限制，因此 M 太小也会间接压低召回天花板。\n- 实践起点：原文给出的起步值是 **M=16**。如果查询质量问题出现在召回偏低，且日志显示并非被 `n_results` 截断，那么优先把 M 调高，并重建索引。\n\n**`hnsw:ef_construction`：建索引时的候选池大小，决定图建得好不好**\n- 含义：insert 一个新节点时，用于为它挑选邻居的候选列表长度。它只在**写入/建索引阶段**生效，不影响查询速度；追求“更优邻居”就意味着更贵更慢的构建。\n- 调大 `ef_construction` 会让邻居选择更准确、索引质量更高、召回更好，但建库耗时上升；调小则建得快、质量下降。\n- 实践起点：原文给出的起步值是 **ef_construction=200**。\n\n**两者分工一句话**：`M` 管“图有多密”（索引规模与容量的折中），`ef_construction` 管“建图时找邻居找得多认真”（构建成本与索引质量的折中）；两者都是**写入侧参数、改了要重建索引**。而**查询期**的精度/速度旋钮是另一个参数 `ef_search`（运行时调，无需重建，查询慢就增大 `ef_search`，并配合调大 `M`）。\n\n**使用注意**\n- 这三个参数的写法在不同 Chroma 版本中略有差异：文档里写成 `hnsw:M`、`ef_construction`、`ef_search`。创建 collection 时应确认当前版本使用的 metadata 键名，例如 `{\"hnsw:space\": \"cosine\", \"hnsw:M\": 16, \"hnsw:construction_ef\": 200, \"hnsw:search_ef\": ...}` 这一类形式。建议以所用版本的官方 API 为准，因为键名拼错会被静默忽略。\n- 另外，Chroma 没有原生距离阈值过滤，`n_results` 是取前 K。因此 `M`/`ef_construction` 调高只提高“召回上限”，不能替代应用侧对 `distances` 的二次筛选。\n\n依据：[[entity/chroma]]、[[source/chroma]]",
+    "usage": {
+     "prompt_tokens": 11166,
+     "completion_tokens": 733,
+     "total_tokens": 11899
+    },
+    "elapsed_ms": 7485.539674758911,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/chroma.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/chroma.md\", \"lines\": \"1-48/48\", \"content\": \"---\\ntitle: Chroma 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/chroma.md]\\nupdated: 2026-02-15\\nsummary: Chroma 的定位、核心概念、嵌入系统、CRUD"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了 M（每节点连接数/图连通度）和 ef_construction（构建时候选池/邻居选择质量）的核心含义与权衡，并补充了 ef_search 的区分，没有实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 965,
+     "completion_tokens": 61,
+     "total_tokens": 1026
+    }
+   }
+  }
+ },
+ {
+  "id": "q24",
+  "type": "exact",
+  "text": "Qdrant 的 Scalar 量化和 Product 量化有什么区别？",
+  "gold": [
+   "qdrant-0052",
+   "qdrant-0054"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：两者都是「量化压缩向量以省内存」，但机制、压缩率/精度代价和默认用法不同。Scalar 是逐维标量量化（每个维度压成 INT8），Product 是分段乘积量化（每段压成一个码字）。**\n\n## 1. 机制差异\n\n| | Scalar 量化 | Product 量化 |\n|---|---|---|\n| 做法 | 对每个维度单独做线性映射，浮点 → INT8 整数 | 把向量切成若干子段，每段用一个「码字/聚类中心」代替（分段乘积量化） |\n| 配置参数 | `type=INT8`、`quantile`（默认常用 0.99，用它定截断范围以抗离群值）、`always_ram` | `type=INT8`、`always_ram`；不再有 `quantile` 这类逐维截断参数 |\n| 压缩幅度 | 原文归在 4–8x 区间内的较低一侧，实现简单、可解释 | 压缩更激进（更多子段更多压缩），但需要训练码本 |\n| 精度损失 | 小、可控；离群值被 `quantile` 截断，因此比暴力截断稳 | 更大，量化误差来自「用码字近似原向量」，需靠 `rescore` 补偿 |\n| 查询参数 | 一般只需 `rescore: True` | 原文示例同时开 `rescore: True` 与 `rescale: True` |\n\n^[raw/qdrant.md]\n\n## 2. 官方示例里的写法差别\n\n- Scalar：`ScalarQuantization(scalar=ScalarQuantizationConfig(type=INT8, quantile=0.99, always_ram=True))`，查询 `search_params={\"quantization\": {\"rescore\": True}}`。\n- Product：`ProductQuantization(product=ProductQuantizationConfig(type=INT8, always_ram=True))`，查询 `{\"quantization\": {\"rescore\": True, \"rescale\": True}}`。\n\n也就是说，Product 的写法里少了 `quantile`，多了 `rescale` —— 这正好对应「不再逐维截断，而是整体重新标定分数尺」的事实。\n\n## 3. 该选哪个（原文三档口径）\n\n原文只给了三档，并没有按 Scalar 和 Product 逐项对比：**低内存用 Scalar（quantile=0.99）/ 均衡用 Scalar + rescore / 高精度不量化**。据此判断：\n\n- 默认先上 **Scalar**：压缩收益大、精度损失小、参数少，配合 `rescore=True` 基本能找回 recall，是性价比最高的一档。\n- 只有 Scalar 仍不够省内存（超大规模、内存是硬约束）才考虑 **Product**，并且必须接受「rescore + rescale 两项都开，且召回仍低于 Scalar」的代价；量化做得更狠，精度就更依赖重打分来兜。\n- `always_ram=True` 是两者的共同开关，表示量化后的向量常驻内存、原向量放磁盘，这是省内存的真正来源；配 `on_disk=True` 才是完整的「内存高」解法。^[raw/qdrant.md]\n\n## 4. 一句话记忆\n\nScalar 是「每个维度打折保存」，Product 是「把向量打包成码本里的几个编号」；前者省内存温和、几乎无损，后者省得更多、但更依赖 rescore/rescale 把分数拉回来。\n\n⚠️ 备注：wiki 的 [[entity/qdrant]] 页目前只写了「Scalar（INT8，quantile 常用 0.99）与 Product 并列、压缩 4–8x」这一行，两种量化的机制差异、Product 无 `quantile` 而有 `rescale` 这两个细节在 wiki 里尚未拆开写，本次是回读 raw 原文补上的；如需长期留存，建议补进 [[entity/qdrant]] 或建一页量化专题。\n\n依据：[[entity/qdrant]]、[[source/qdrant]]（并回读 raw/qdrant.md 第 10 节核实）",
+    "usage": {
+     "prompt_tokens": 35974,
+     "completion_tokens": 1252,
+     "total_tokens": 37226
+    },
+    "elapsed_ms": 14107.550144195557,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/qdrant.md\", \"lines\": \"1-77/77\", \"content\": \"---\\ntitle: Qdrant 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Qdrant 的 Rust 高性能定位、Colle"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_raw",
+       "search_wiki"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "qdrant.md",
+        "offset": "0",
+        "limit": "200"
+       },
+       "search_wiki": {
+        "query": "量化",
+        "limit": "10"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 1-200 / 2164\\n# Qdrant\\n\\n> 高性能开源向量数据库 —— 为 AI 应用提供极速向量搜索与过滤\\n\\n---\\n\\n## 1. 项目简介\\n\\n### 1.1 什么是 Qdrant\\n\\nQdrant（发音为\\\"quadrant\\\"）是一个开源的**高性能向量相似度搜索引擎和数据库**，使用 Rust ",
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/checkpoint-recovery.md:55 — D11 实测（`checkpoint-recovery`，2026-11-13，4 场景 × 2 模式 × 3 次重复）：基线无检查点、恢复即整链重跑恒 5 步；增强为 SqliteSaver（durability=sync）+ 幂等注册表\", \"concept/rag-pipeline."
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "qdrant.md",
+        "offset": "900",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 901-1100 / 2164\\n)\\n\\n# 搜索某矩形区域内的点\\nfrom qdrant_client.models import GeoBoundingBox\\n\\nresults = client.query_points(\\n    collection_name=\\\"my_collection\\\",\\n    qu"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "参考资料仅给出两者的客户端配置代码片段，未提供机制、压缩率、精度等说明；答案对两者差异的详细对比（如码本训练、压缩幅度、精度代价）超出原文，属编造，仅有部分配置参数（quantile、rescale）有据。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1290,
+     "completion_tokens": 71,
+     "total_tokens": 1361
+    }
+   }
+  }
+ },
+ {
+  "id": "q25",
+  "type": "exact",
+  "text": "Qdrant 稀疏向量适合表示哪几类特征？",
+  "gold": [
+   "qdrant-0073"
+  ],
+  "arms": {
+   "single": {
+    "final": "**Qdrant 稀疏向量适合表示的特征**\n\n核心是两类，都靠 `SparseVector{indices, values}` + `Sparse-Inv-Idx` 倒排索引实现（可设 `full_scan_threshold`）：\n\n1. **BM25 / SPLADE 风格的关键词（词项级）特征** —— 即「词项 → 权重」的稀疏表示：绝大多数维度为 0，只有命中的词项有值。它承担的是混合检索里「精确串匹配」那一路召回，专治专有名词、编号、错误码、业务黑话这类密集向量容易「语义上像但字面不中对」的查询；SPLADE 则是在此基础上由模型学出词项扩展权重的稀疏版本。\n2. **one-hot 类 / 类别型特征** —— 离散 ID、标签、类目这类天然 one-hot 或稀疏计数的特征，用稀疏向量表达比稠密向量省空间也更贴合语义。\n\n配套的配置与用法要点：\n\n- **它的角色是「单库双路」的稀疏底座**：与多向量配置（`VectorParams` 写成「名字→VectorParams」字典）配合，可在同一个 Collection 内同时存密集向量（走 HNSW）与稀疏向量（走倒排索引），RRF 融合前不必做跨库 join——这是它相对 Chroma（只存密集向量）的实质差异。\n- **距离度量**上，原文的建议是稀疏特征场景可用 Manhattan，文本语义用 Cosine（Cosine/Dot 建议先归一化）。\n- **失效边界**：中文分词不补专有词时 BM25 对业务黑话基本无效；语料若全是同义改写型问法，这条稀疏路的增量接近零；召回阶段没捞出来的，后面的精排也救不回。\n\n一句话：**Qdrant 的稀疏向量就是为「关键词级词项匹配（BM25/SPLADE）」和「one-hot 类别特征」准备的**，用途是把混合检索里的字面召回路直接放进向量库，而不是当成又一个语义向量槽位。\n\n依据：[[entity/qdrant]]、[[source/qdrant]]、[[concept/hybrid-retrieval]]",
+    "usage": {
+     "prompt_tokens": 30960,
+     "completion_tokens": 687,
+     "total_tokens": 31647
+    },
+    "elapsed_ms": 9823.803186416626,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/qdrant.md\", \"lines\": \"1-77/77\", \"content\": \"---\\ntitle: Qdrant 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Qdrant 的 Rust 高性能定位、Colle"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "稀疏向量"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/hybrid-retrieval.md:40 — 两路可以分库也可以单库：[[entity-qdrant]] 原生支持稀疏向量（`SparseVector{indices, values}` + 倒排索引），配合多向量配置，可在同一 Collection 内同时存放密集向量与 BM25/S\", \"entity/chroma.md:42 — Ch"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/hybrid-retrieval.md",
+        "limit": "80",
+        "offset": "20"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/hybrid-retrieval.md\", \"lines\": \"21-52/52\", \"content\": \"| 加权求和 | 可控 | 需归一化分数，权重按语料调 |\\n| 学习式（LambdaMART 等） | 效果最好 | 要有标注数据 |\\n\\nRRF 的 k 不是准确率旋钮，调它改变的是名次衰减速度（出自 Cormack 等 2009 "
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案主要覆盖了 BM25 风格文本嵌入和 one-hot 类别特征，但遗漏了参考资料中的关键点“关键词匹配/高度区分性特征”，且引入了参考资料未提及的 SPLADE、配置细节等额外内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 670,
+     "completion_tokens": 60,
+     "total_tokens": 730
+    }
+   }
+  }
+ },
+ {
+  "id": "q26",
+  "type": "exact",
+  "text": "Qdrant 创建 payload 索引时 text_index 的 tokenizer 参数怎么配？",
+  "gold": [
+   "qdrant-0066",
+   "qdrant-0067"
+  ],
+  "arms": {
+   "single": {
+    "final": "回答如下。\n\n## 结论先说\n\nQdrant 的 TEXT payload 索引确实支持 `tokenizer` 参数，但 wiki 里只有「存在这个参数」的结论（`entity/qdrant.md` 记为 TEXT 类型「可配 tokenizer、min/max_token_len、lowercase」），**没有收录它的具体取值、默认行为和调用写法**。我三次回读 raw 原文（`raw/qdrant.md` 前 200 行、701–1100 行）都落在概念/过滤/量化章节，原始资料在 payload 索引这一节并没有给出 tokenizer 的配置示例——`create_payload_index` 在整个原始资料里也没有可检索到的片段。所以下面把「知识库能确认的」和「属于通用 Qdrant 知识、需你回官方文档核对的」分开写，避免把记忆当依据。\n\n## 一、知识库能确认的部分\n\n- Payload 索引共六类：KEYWORD / INTEGER / FLOAT / BOOL / **TEXT** / GEO，其中只有 TEXT 支持全文索引与分词器（tokenizer），并可配 `min_token_len` / `max_token_len` / `lowercase`。^[raw/qdrant.md]\n- 索引是建在「schema 字段」上的（`create_payload_index(collection_name, field_name, field_schema=...)` 这一层），不是建在向量上；建完后 `Filter` 的 `FieldCondition(key=..., match=...)` 才能走索引。^[raw/qdrant.md]\n- 它的设计取向是「过滤即搜索」——payload 过滤与向量检索深度集成，索引的目的是让 `must/should/must_not` 条件不退化成全量扫描。^[raw/qdrant.md]\n- 在混合检索语境里，真正的 BM25 关键词召回走的是**稀疏向量**（`SparseVector{indices, values}` + `Sparse-Inv-Idx` 倒排索引），不是 TEXT payload 索引；TEXT 全文索引只适合「按关键词过滤/预筛」，不能替代 BM25 打分。^[raw/qdrant.md] 参见 [[concept/hybrid-retrieval]] 里两路召回的定位。\n\n## 二、tokenizer 参数怎么配（通用 Qdrant 口径，标注为待核实）\n\nQdrant 的 `TextIndexParams` 中 `tokenizer` 是一个枚举 `TokenizerType`，常见四类，选型判据是**看语种与是否需要词形归一**：\n\n| tokenizer | 行为 | 适用 |\n|---|---|---|\n| `word` | 按词边界切分，最常用 | 英文等空格分词语言 |\n| `whitespace` | 仅按空白切 | 预分词好的文本、标签串 |\n| `prefix` | 前缀切分，支持前缀匹配 | 自动补全/输入中检索 |\n| `multilingual` | 按语言规则切分（会加载语言数据） | 多语种混排 |\n\n配套三个参数：`lowercase=True`（大小写归一，几乎总该开）、`min_token_len` / `max_token_len`（滤掉单字符与超长 token，中文建议放宽下限、避免被切碎后全被丢弃）。\n\nPython SDK 侧大致写法：\n\n```python\nfrom qdrant_client.models import TextIndexParams, TokenizerType\n\nclient.create_payload_index(\n    collection_name=\"docs\",\n    field_name=\"content\",\n    field_schema=TextIndexParams(\n        type=\"text\",\n        tokenizer=TokenizerType.WORD,   # word / whitespace / prefix / multilingual\n        lowercase=True,\n        min_token_len=2,\n        max_token_len=20,\n    ),\n)\n```\n\n三个实操要点：\n\n1. **CJK 场景要谨慎**：`word` 对中文的效果依赖底层分词，中文召回质量通常不如直接上稀疏向量（BM25/SPLADE），wiki 在切分环节也提醒过「中文要考虑 BPE tokenizer 对 CJK 的分词影响」。^[concept/rag-pipeline.md]\n2. **索引建立后改 tokenizer 不生效于已有数据**——需要重建该字段的索引（等价于删索引再建），这属于通用 Qdrant 行为，原文未涉及。\n3. **TEXT 索引 ≠ 可打分的检索**：要排序分数就得走稀疏向量路线；TEXT 索引只把「包含某词」的候选快速筛出来，再交给向量或 rerank 排序。\n\n## 三、建议\n\n如果你要的是「中文关键词过滤 + 向量语义召回」的混合方案，按 wiki 的判断，正确做法是同 Collection 内挂一路 `SparseVector`（BM25 侧）而非依赖 TEXT 索引的 tokenizer 调参（[[entity/qdrant]] 的「稀疏向量」与 [[concept/hybrid-retrieval]] 的 RRF 融合口径）。`tokenizer` 建议只用在「类目/标签/标题」这类 you 需要 `MatchText` 式模糊过滤的短字段上。\n\ntokenizer 的精确枚举名和默认值，本知识库未完整覆盖，请以官方 `TextIndexParams` 文档为准；若需要，我可以把这次综合结论回写到 `answers/` 下留存。\n\n依据：[[entity/qdrant]]、[[source/qdrant]]、[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]",
+    "usage": {
+     "prompt_tokens": 68724,
+     "completion_tokens": 1616,
+     "total_tokens": 70340
+    },
+    "elapsed_ms": 20058.7420463562,
+    "steps": 8,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/qdrant.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/qdrant.md\", \"lines\": \"1-77/77\", \"content\": \"---\\ntitle: Qdrant 向量数据库完全指南（原文摘要）\\ntype: source\\nsources: [raw/qdrant.md]\\nupdated: 2026-02-14\\nsummary: Qdrant 的 Rust 高性能定位、Colle"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "TEXT"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:18 — | Context Recall | 算法是「从标准答案抽信息点，逐点查是否出现在召回里」，无 gold 无从抽点 |\", \"answers/answer-rag-eval-metrics.md:28 — | Context Precision | 逐个判 top-k 是否相关，越"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "qdrant.md",
+        "offset": "0",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 1-200 / 2164\\n# Qdrant\\n\\n> 高性能开源向量数据库 —— 为 AI 应用提供极速向量搜索与过滤\\n\\n---\\n\\n## 1. 项目简介\\n\\n### 1.1 什么是 Qdrant\\n\\nQdrant（发音为\\\"quadrant\\\"）是一个开源的**高性能向量相似度搜索引擎和数据库**，使用 Rust "
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "create_payload_index"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": []}"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "qdrant.md",
+        "offset": "700",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 701-900 / 2164\\n\\n# 聚合统计\\nresults = client.count(\\n    collection_name=\\\"my_collection\\\",\\n    count_filter=Filter(\\n        must=[\\n            FieldCondition(key=\\"
+      }
+     },
+     {
+      "step": 6,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "limit": "200",
+        "offset": "900",
+        "path": "qdrant.md"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# qdrant.md 行 901-1100 / 2164\\n)\\n\\n# 搜索某矩形区域内的点\\nfrom qdrant_client.models import GeoBoundingBox\\n\\nresults = client.query_points(\\n    collection_name=\\\"my_collection\\\",\\n    qu"
+      }
+     },
+     {
+      "step": 7,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案给出了 tokenizer 的配置写法与取值表，但参考资料实际已包含 text_index 的 tokenizer 配置示例（word、min/max_token_len、lowercase），候选答案却称知识库未收录具体写法并标注为待核实，存在明显偏差；核心参数（tokenizer 取值与配套参数）基本覆盖。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1568,
+     "completion_tokens": 83,
+     "total_tokens": 1651
+    }
+   }
+  }
+ },
+ {
+  "id": "q27",
+  "type": "exact",
+  "text": "检查点 durability 三档 exit/async/sync 分别在什么时候写快照？",
+  "gold": [
+   "flow-control-0030"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：三档的差别是相对“下一个 super-step”的写盘时机。**\n\n| 模式 | 何时写快照 | 崩溃时丢什么 | 适用场景 |\n|---|---|---|---|\n| `exit` | **只在图退出时写一次**；运行中的每个 super-step 都不写入 | 中间状态全部没有；如果进程被强制结束，就只剩“从头重跑” | 长任务、性能优先、可以整体重跑且副作用可控 |\n| `async`（默认） | **下一步执行期间异步写**；也就是边运行边写入，但不保证当前步执行前已经写入 | 小概率丢失最近一步，依赖调度时序 | 绝大多数场景的默认选择 |\n| `sync` | **下一步开始前同步写完**；当前 step 的快照已经写入后，才允许继续 | 每一步都有快照；崩溃后最多重做失败的那一步 | 涉及钱、库存、不可重放的外部调用 |\n\n**以下是几点容易误解的细节（来自同一页）**\n\n1. **写入粒度是 super-step 而不是单节点边界**：一步里被调度的节点（包括并行节点）全部运行完，才产出一份完整快照；顺序图 `START→A→B→END` 写四份，本质是四个 super-step。并行节点在同一步只产出一份。\n2. **pending writes 细化了“丢什么”**：每个节点运行完先把写入写入 task 级记录，不等整步结束，所以同一步里 A 成功、B 失败时，恢复只补 B、A 不重跑。`async` 丢失的“最近一步”是乐观说法，真实丢失范围取决于调度时序。\n3. **“中途崩溃不会自动快照”只对 `exit` 成立**；默认 `async` 是会有快照的，只是可能少最后一步。因此，如果要验证“崩溃时不丢步骤”，就必须显式设成 `sync`。\n4. **durability 与存储选型互不影响**：`InMemorySaver / SqliteSaver / PostgresSaver / MongoDBSaver` 决定“快照写入哪里、能否被多个进程共享”；durability 决定“什么时候写入”。\n5. **检查点不等于恰好一次**：检查点只保证知道从哪继续，副作用唯一性要靠幂等。D11 实测（SqliteSaver + `durability=sync` + 幂等注册表）显示 crash 场景重做 2 步、重复副作用 0；而 `exit` 硬杀后快照全无、整链重做 5 步。\n\n依据：[[concept/checkpoint-recovery]]、[[answers/answer-sqlitesaver-scenarios]]",
+    "usage": {
+     "prompt_tokens": 10944,
+     "completion_tokens": 685,
+     "total_tokens": 11629
+    },
+    "elapsed_ms": 7627.084255218506,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-sqlitesaver-scenarios.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-sqlitesaver-scenarios.md\", \"lines\": \"1-37/37\", \"content\": \"---\\ntitle: SqliteSaver 用在什么场景：单机验证档的检查点存储\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖三档写快照时机、崩溃代价和适用场景，与参考资料一致，补充细节未编造且不冲突。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 846,
+     "completion_tokens": 40,
+     "total_tokens": 886
+    }
+   }
+  }
+ },
+ {
+  "id": "q28",
+  "type": "exact",
+  "text": "为什么 interrupt 不能被 except Exception 捕获？",
+  "gold": [
+   "flow-control-0036"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：因为 `interrupt()` 不是「返回一个暂停信号」，而是靠抛出异常来实现的；它抛出的异常专门绕开了 `except Exception`。**\n\n## 机制：BubbleUp 是跳出 try 的通道\n\nLangGraph 里的 `interrupt()` 内部抛的是 `GraphInterrupt`，而 `GraphInterrupt` 继承自 `GraphBubbleUp`。`GraphBubbleUp` 的定位就是「向上冒泡，不许被普通业务代码接住」——只有图运行时自己会捕获它，用来在检查点落盘并返回 `interrupts`。\n\n问题在于：大多数人的写法是 `except Exception:`。如果 `GraphInterrupt` 直接继承 `Exception`，那么它就会被这个宽泛的捕获拦住。表现出来的现象不是报错，而是**图卡住不动**：中断信号被吞掉，运行时永远收不到，流程既没继续也没真正挂起。所以框架从继承层就把它与普通 `Exception` 分开，让 `except Exception` 天然漏过它。\n\n## 正确写法\n\n- **`interrupt()` 单独一行，绝不放进 try 块**；容易出错的代码另外放 try，并且只捕获具体异常类型（如 `httpx.TimeoutException`）。\n- 需要在出错时再问人的，正确做法是：执行节点 `try` 干活 → `except` 具体异常 → 把错误写进 `state.error` → 由条件边进入确认节点，节点里判断 `state` 有 error 才 `interrupt({...})`。**不要在 `except` 块里直接调用 `interrupt()`**——现在能跑，但下次改动很容易把它挪进 try 里，埋下隐患。\n- 另外两个相关易错点：`invoke()` 不会把中断异常抛给调用方，payload 在返回值的 `__interrupt__` 字段；恢复不是「断点续行」，而是**整个节点重跑**（所以 interrupt 之前的副作用必须幂等，高风险动作要放到 interrupt 之后）。\n\n## 其它三条硬规则（同源）\n\n1. 同一节点多个 interrupt 的**顺序不能改**：恢复值是任务级列表、按下标严格匹配，顺序一变第一个就吃掉本该给第二个的值（并行分支是另一套：按 interrupt ID 映射，一次性恢复）。\n2. payload 要简单、可 JSON 序列化，只放审批要用的信息，其余用 ID 引用。\n3. 不配 checkpointer，interrupt 无处落盘，恢复与记忆全部失效——它和 try/except 问题一样，都属于「一个条件不满足就整条链路静默失效」。\n\n一句话记法：**框架负责停在哪、存什么、从哪续；异常捕获属于业务代码的领地，所以 interrupt 必须从异常捕获的领地旁边绕过去。**\n\n依据：[[concept/interrupt-hitl]]、[[concept/checkpoint-recovery]]",
+    "usage": {
+     "prompt_tokens": 11103,
+     "completion_tokens": 729,
+     "total_tokens": 11832
+    },
+    "elapsed_ms": 8522.141933441162,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/checkpoint-recovery.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/checkpoint-recovery.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: 检查点与断点恢复：super-step、durability 与四类「停下」\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-0"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料核心要点：GraphInterrupt 继承 GraphBubbleUp 以绕过 except Exception，被捕获会导致图卡住，并给出正确写法，无编造错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 818,
+     "completion_tokens": 50,
+     "total_tokens": 868
+    }
+   }
+  }
+ },
+ {
+  "id": "q29",
+  "type": "exact",
+  "text": "HITL 的 approve/edit/reject/respond 四种决策分别是什么意思？",
+  "gold": [
+   "flow-control-0042"
+  ],
+  "arms": {
+   "single": {
+    "final": "**HITL 四种决策的含义**\n\n| 决策 | 含义 | 适用场景 |\n|---|---|---|\n| `approve` | 按原计划照原样执行，参数不改动 | 人类审核后认为模型拟定的动作、参数与影响范围都没问题 |\n| `edit` | 先修改参数再执行 | 大方向对，但收件人、金额、路径、措辞等具体参数需要人工纠正 |\n| `reject` | 拒绝执行，并附上理由 | 动作不该做，人给出否决原因，供后续流程或模型改写时参考 |\n| `respond` | 不调用工具，直接向用户回话 | 人类的真实意图是「别执行，只告诉我就行」 |\n\n关键要点：\n\n1. **`respond` 最常被漏掉**。典型场景：用户问「能帮我发邮件吗」，模型准备好调用发信工具并触发中断，但人类实际上想说的是「不用真发，告诉我怎么写就好」。如果只实现 approve/edit/reject 三选一，系统只能被迫在「发」和「不发且流程失败」之间二选一，无法表达「跳过工具、直接给答案」。\n2. **四种决策都只是 `interrupt()` 挂起后，经由 resume 回传的结果**。恢复不是从断点继续执行，而是整个节点重入重跑；因此 `interrupt` 之前的副作用必须幂等，高风险动作要放到 `interrupt` 之后。^[raw/flow-control.md]\n3. **要让这套决策真正生效，三件事必须同时成立**：配置了 `interrupt_on`、挂载了 checkpointer、恢复时使用同一个 `thread_id`。\n4. 中断条件建议做成**条件中断**，例如金额超阈值、收件人在外域、路径命中受保护目录时才中断，而不是按工具名一刀切；否则会带来审批疲劳，人会盲点同意，护栏形同虚设。\n\n依据：[[concept/interrupt-hitl]]、[[source/flow-control]]",
+    "usage": {
+     "prompt_tokens": 9863,
+     "completion_tokens": 530,
+     "total_tokens": 10393
+    },
+    "elapsed_ms": 6307.360410690308,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/interrupt-hitl.md"
+       },
+       "search_wiki": {
+        "query": "approve"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/interrupt-hitl.md\", \"lines\": \"1-42/42\", \"content\": \"---\\ntitle: interrupt 四条硬规则与人机协同（HITL）\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: inter",
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/interrupt-hitl.md:29 — | `approve` | 照原样执行 |\", \"source/flow-control.md:71 — 四种决策：`approve`、`edit`、`reject`、`respond`——第四种最常被漏（用户其实只想让你告诉怎么写，不要真发邮件）。生效三条件：配了 `interrupt_on`、挂"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖四种决策的含义，并正确突出 respond 这一最易遗漏点，无实质错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 661,
+     "completion_tokens": 36,
+     "total_tokens": 697
+    }
+   }
+  }
+ },
+ {
+  "id": "q30",
+  "type": "exact",
+  "text": "幂等的三种做法分别是什么、各自适合什么场景？",
+  "gold": [
+   "flow-control-0025"
+  ],
+  "arms": {
+   "single": {
+    "final": "**幂等的三种做法（机制、适用场景与选型要点）**\n\n| 做法 | 机制 | 适合场景 | 代价与注意 |\n|---|---|---|---|\n| **幂等键** | 每次请求带一个唯一键（如请求 ID 或业务单号），下游按这个键去重，同一个键第二次执行直接返回上次结果、不再真正执行 | 调用**外部写接口**的场景（支付、发货、发消息、第三方下单）——这类副作用发生在事务之外，你无法控制对方是否支持按业务状态判断 | 需要下游配合，或者自己在中间层维护一张去重表；键必须在“重试或重入”前后保持不变（这一点最关键，重试时若重新生成键，等于没做幂等） |\n| **先查后写（存在则跳过）** | 执行前先查目标状态或目标对象是否存在，已存在就直接跳过这一步 | 存在**天然业务唯一键**的场景（订单号、用户 ID 加日期、报告编号这类天然唯一的东西） | 如果“查”和“写”之间没有原子性或有竞态，就会漏掉，更适合写入方本身幂等、或者并发很低的场景；没有自然唯一键时强行加一个唯一键，本质上是退化成幂等键 |\n| **状态机** | 把流程建模成有限状态，只允许合法迁移（如 `draft → submitted → published`），已经处于完成状态的目标状态时，迁移被拒绝，重复执行因此没有副作用 | **长流程、多步流程**（长任务、多节点流水线、审批链），尤其是恢复时需要从中间某一步重新进入的流程 | 要求状态迁移集中在一处进行校验，否则各处绕过状态校验，状态机就无法起到保证作用；状态过多时，迁移表会膨胀 |\n\n**共同的前提：为什么必须有幂等**\n导致同一逻辑执行两次的情况只有两类——**超时后的重试**和**恢复时的节点重入**（检查点恢复会把整个节点重新跑一遍）。没有幂等，结果就是重复扣款、重复发消息。并且要明确：**检查点只解决“从哪继续”，不解决“只做一次”**，后者必须由幂等来补齐，二者缺一不可。\n\n**配套的两条纪律**\n1. **重试前先判幂等**：非幂等操作不能盲目重试——这是重试三条纪律之一（另两条是只对可恢复异常重试、次数上限加指数退避抖动）。\n2. **落位原则**：高风险动作放在“确认之后”，低风险查询放在“确认之前”。查询重跑一次无害，扣款重跑一次就是事故；这条也是 interrupt 四条硬规则之一“interrupt 之前的副作用必须幂等”的来源。\n\n**有效性有实测支撑**：D11 对照实验里，`crash@write_report` 场景（外部写之后硬杀进程）基线必然重复副作用 1 次（报告被发布两次），加幂等副作用注册表后为 0，并在 `dup_blocks` 留痕 1 次——做到“dup=0 且有据可查”。反过来说，如果单步任务、或可整体重跑且本身没有副作用，幂等的收益接近于零。\n\n依据：[[concept/idempotency]]、[[concept/agent-reliability]]、[[concept/checkpoint-recovery]]、[[source/flow-control]]",
+    "usage": {
+     "prompt_tokens": 30450,
+     "completion_tokens": 990,
+     "total_tokens": 31440
+    },
+    "elapsed_ms": 11813.233852386475,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/agent-reliability.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/agent-reliability.md\", \"lines\": \"1-51/51\", \"content\": \"---\\ntitle: Agent 可靠性：四类失败、三道防线与重试纪律\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: Agen"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_raw"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/checkpoint-recovery.md"
+       },
+       "read_raw": {
+        "path": "flow-control.md",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/checkpoint-recovery.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: 检查点与断点恢复：super-step、durability 与四类「停下」\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-0",
+       "read_raw": "OBSERVE {\"content\": \"# flow-control.md 行 1-200 / 524\\n# 流程控制与可靠性\\n\\n> 建立日期：2026-11-09　｜　重写：2026-11-09 按「一份文档写满所有标题」重做，六篇机制材料（2064 行）并入本文件后删除\\n> 对应 [[02-AI/AI知识库/流程控制与可靠性|AI知识库 / 流程控制与可靠性]]\\n> 实测：2026-"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "limit": "120",
+        "offset": "200",
+        "path": "flow-control.md"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# flow-control.md 行 201-320 / 524\\n\\n关键一条：`interrupt()` 走 `GraphBubbleUp`，**不交给 error_handler，也不会被重试**。所以「中断」与「报错」在框架里是两条路，不会互相吞。\\n\\n### 4.3 重试的三条纪律\\n\\n- 只对可恢复异常重试。参数错、鉴权错重试一百次结果一"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料中三种幂等做法（幂等键、先查后写、状态机）的机制与适用场景，并补充了合理细节，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 937,
+     "completion_tokens": 49,
+     "total_tokens": 986
+    }
+   }
+  }
+ },
+ {
+  "id": "q31",
+  "type": "exact",
+  "text": "RAGAs 评测用哪四个指标？",
+  "gold": [
+   "rag-total-0073"
+  ],
+  "arms": {
+   "single": {
+    "final": "RAGAs 默认用到的是四个核心指标，也就是官方示例的 `metrics` 中给出的四项，它们都是基于模型的判断型指标：\n\n| 指标 | 评的是 | 怎么算 |\n|---|---|---|\n| **Faithfulness**（忠实度） | 生成的回答是否只依据召回资料 | 把回答拆成独立陈述，逐条判断「能否仅从给定资料推出」，能推出的条数 ÷ 总条数^[raw/rag-total.md] |\n| **Answer Relevancy**（答案相关性） | 回答是否直接、完整地回应问题 | 看是否覆盖问题的各个维度、有无多余内容^[raw/rag-total.md] |\n| **Context Precision**（上下文精确率） | 召回的块里相关内容的占比，以及相关内容是否排在前面 | 逐个判断 top-k 是否相关，越靠前权重越高^[raw/rag-total.md] |\n| **Context Recall**（上下文召回率） | 回答所需的信息点被召回覆盖了多少 | 从标准答案抽信息点，逐点检查是否出现在召回里^[raw/rag-total.md] |\n\n## 使用要点\n\n- **四字段必需**：`user_input`（问题）、`retrieved_contexts`（召回上下文）、`response`（模型回答）、`ground_truth`（标准答案）。缺 `ground_truth` 时，Context Recall 无从计算。^[raw/rag-total.md]\n- **两段对应**：Context Precision、Context Recall 用于评估检索段，Faithfulness、Answer Relevancy 用于评估生成段；分开看才能定位问题是「没找到」还是「没用上」。^[raw/rag-total.md]\n- **指标本身也是模型判的**：RAGAs 属于「要标准答案、不要人工盯跑分」的方式，但标准答案质量决定分数上限，LLM 裁判有偏好，上线前需抽检校准。^[raw/rag-total.md]\n- **知识库里还有第五个指标**：五个核心指标里多一个 **Context Relevancy**（召回内容整体是否偏题），它不在 RAGAs 默认四项内，但可作为补充。^[raw/rag-total.md]\n- **数据集口径**：从真实提问抽 20–50 条，分常规 ~90%、边界（含无答案、歧义）5–10 条、对抗（跨段拼）5–10 条；没有无答案样本就测不出拒答；调参样例与最终测试样例必须分开。^[raw/rag-total.md]\n\n一句话记法：**检索段两个 Context 指标（Precision、Recall），生成段两个指标（Faithfulness、Answer Relevancy）**。\n\n依据：[[answers/answer-rag-eval-metrics]]、[[source/rag-total]]、[[concept/rag-pipeline]]",
+    "usage": {
+     "prompt_tokens": 49584,
+     "completion_tokens": 1029,
+     "total_tokens": 50613
+    },
+    "elapsed_ms": 14175.33540725708,
+    "steps": 7,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-rag-eval-metrics.md"
+       },
+       "search_wiki": {
+        "query": "RAGAs"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-rag-eval-metrics.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: RAG 评估方案中哪些指标要标准答案、哪些可免人工\\ntype: concept\\nsources: [raw/rag-total.md, raw/kb-rag.md]\\nupdated: 2026-1",
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:19 — | RAGAs 端到端 | 必需四字段：问题、召回上下文、模型回答、标准答案 |\", \"answers/answer-rag-eval-metrics.md:39 — - **RAGAs 跑分**：标准答案由人提供后，打分本身是模型做的，日常回归无需人盯。\", \"answers/a"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md",
+        "offset": "30",
+        "limit": "60"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"31-88/88\", \"content\": \"\\n解析：模型看到的是文本不是 PDF，解析错则无法补救；六种输入各有工具（MinerU 版面模型、PaddleOCR、pdfplumber/PyMuPDF、多模态描述）；表格要单独保护（整表成块或按行切重复表头、表名列名写进块文本）；清洗三件事（去页眉"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "rag-total.md",
+        "offset": "1150",
+        "limit": "120"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 1151-1233 / 1233\\n\\n## 十六、常见误区与排查\\n\\n### 16.1 五个误区\\n\\n| 误区 | 实际 |\\n|---|---|\\n| Embedding 越大越好 | 领域失配比维度不足更常见，先看语料再换模型 |\\n| top_k 越大越好 | 没有重排时放大 K 直接掉准确率 |\\n| 全库一"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "limit": "120",
+        "offset": "880",
+        "path": "rag-total.md"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 881-1000 / 1233\\n[No Retrieval] 可直接回答\\n[Relevant] 检索结果高度相关\\n[Irrelevant] 检索结果不相关\\n[Supported] 回答被资料支持\\n[Contradict] 回答与资料矛盾\\n```\\n\\n收益是少做无用检索；代价是多轮判断，延迟上升，且标签本身也会"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "limit": "130",
+        "offset": "750",
+        "path": "rag-total.md"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 751-880 / 1233\\n### 10.3 对话状态该记什么\\n\\n三样：用户已确认的事实（产品型号、时间范围）、当前任务的目标、已经排除的选项。前两样用于改写查询，第三样用于避免重复推荐同一批被否掉的内容。\\n\\n### 10.4 历史怎么压\\n\\n超过五轮就压。两种压法：滑动窗口只留最近 N 轮，简单但会丢早期信"
+      }
+     },
+     {
+      "step": 6,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确列出参考资料中的四个指标 faithfulness、answer_relevancy、context_precision、context_recall，并正确说明各指标含义及四个必需字段，无编造内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 887,
+     "completion_tokens": 49,
+     "total_tokens": 936
+    }
+   }
+  }
+ },
+ {
+  "id": "q32",
+  "type": "exact",
+  "text": "Faithfulness 指标的具体计算步骤是什么？",
+  "gold": [
+   "rag-total-0072"
+  ],
+  "arms": {
+   "single": {
+    "final": "**Faithfulness（忠实度）的计算步骤**\n\n概念定位：Faithfulness 判的是「回答 ↔ 检索到的资料」这一成对关系，不涉及标准答案，因此可以不要 gold 数据集、也可由 LLM 全自动打分，属于「无需标准答案」的四项指标之一（Context Precision / Context Relevancy / Faithfulness / Answer Relevancy）。它是 RAG 生成段的核心指标之一，与 Context Precision / Recall / Relevancy、Answer Relevancy 一起构成 RAGAs 的五个核心指标（RAGAs 端到端跑分才需要四字段：问题、召回上下文、模型回答、标准答案）。\n\n具体计算步骤（RAGAs 口径的可执行流程）：\n\n1. **拆陈述**：取「模型回答」原文，让 LLM 把它拆成若干条互相独立的原子陈述（statement）。拆的粒度要求是每条只含一个可判定真伪的事实，复合句要拆开，修辞、过渡句、纯建议类内容过滤掉。\n2. **逐条溯源**：对每条陈述，把「召回上下文（retrieved contexts）」作为唯一证据，问一次「这条陈述能否仅从给定资料中推出？」，输出 Supported（支持）/ Unsupported（不支持）两态（RAGAs 实现里还会再分成「可推出」「不可推出」两类并给出理由）。\n   - 判据边界：只允许用给定资料，不允许用模型的世界知识补足；资料没提＝不支持。\n   - 数值、单位、条件、否定语义必须与资料一致；口径近似但资料未明说的，判不支持。\n3. **计分**：Faithfulness = 被支持的陈述条数 ÷ 回答拆分出的陈述总条数（取值 0–1，越高越忠实）。\n4. **看反对证据**：若某条陈述与资料矛盾（而非仅仅缺证据），除了不计入支持数，还应单独记入「矛盾/幻觉」样本清单——这一项与 Self-RAG 的 `[Supported]` `[Contradict]` 标签思路同源，用于定位是「没依据」还是「说反了」。\n5. **样例级汇总与回归**：单条问答的出分只作参考，要在 20–50 条固定测试集（常规 ~90%、边界含无答案 5–10%、对抗跨段拼接 5–10）上取均值做回归；调参样例与最终测试样例必须分开，否则等于背答案。\n\n工程注意点：\n\n- **必须先分两段评**：Faithfulness 低要先分清是「资料本身没捞到（检索段问题，看 Context Recall/Precision）」还是「捞到了没用上/乱发挥（生成段问题）」，否则会误改提示词。\n- **裁判是 LLM**：可自动化但存在偏好，上线前需人工抽检校准一次；人工只该花在造 gold、校准裁判、解析切分抽样验收这三处。\n- **和 Answer Relevancy 别混**：Faithfulness 管「有没有依据」，Answer Relevancy 管「答没答到问题、有无多余内容」；两句都对但一句没依据，是典型的 faithfulness 掉分。\n- **语料侧的前置依赖**：资料若在解析/切分阶段已损坏（表格塌成一行、双栏串栏），Faithfulness 会稳定偏低且无解——因为证据根本不在上下文里。\n\n依据：[[answers/answer-rag-eval-metrics]]、[[source/rag-total]]、[[concept/rag-pipeline]]、[[concept/rag-production]]",
+    "usage": {
+     "prompt_tokens": 51919,
+     "completion_tokens": 1155,
+     "total_tokens": 53074
+    },
+    "elapsed_ms": 15358.193159103394,
+    "steps": 7,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-rag-eval-metrics.md"
+       },
+       "search_wiki": {
+        "query": "Faithfulness"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-rag-eval-metrics.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: RAG 评估方案中哪些指标要标准答案、哪些可免人工\\ntype: concept\\nsources: [raw/rag-total.md, raw/kb-rag.md]\\nupdated: 2026-1",
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:30 — | Faithfulness | 回答拆独立陈述，逐条问「能否仅从给定资料推出」 |\", \"source/rag-total.md:52 — 必须分两段评。五个核心指标（Context Precision / Recall / Relevancy、Faithfulness、Answ"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md",
+        "offset": "30",
+        "limit": "60"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"31-88/88\", \"content\": \"\\n解析：模型看到的是文本不是 PDF，解析错则无法补救；六种输入各有工具（MinerU 版面模型、PaddleOCR、pdfplumber/PyMuPDF、多模态描述）；表格要单独保护（整表成块或按行切重复表头、表名列名写进块文本）；清洗三件事（去页眉"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "rag-total.md",
+        "offset": "0",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 1-200 / 1233\\n# 文档处理与RAG\\n\\n> 建立日期：2026-11-09　｜　重写：2026-11-09 按「一份文档写满所有标题」的要求重做，原两份机制长文的内容全部并入本文件，原件已删\\n> 对应 [[02-AI/AI知识库/文档处理与RAG|AI知识库 / 文档处理与RAG]]\\n> 定位：这个模块"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "Context Precision"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:28 — | Context Precision | 逐个判 top-k 是否相关，越靠前权重越高；不需先知道答案 |\", \"source/rag-total.md:52 — 必须分两段评。五个核心指标（Context Precision / Recall / Relevancy、Faith"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "limit": "200",
+        "offset": "830",
+        "path": "rag-total.md"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 831-1030 / 1233\\n| 环节 | 量级 | 优化手段 |\\n|---|---|---|\\n| 查询向量化 | 几十毫秒 | 批量、缓存、换小模型 |\\n| ANN 检索 | 几到几十毫秒 | 调 ef、量化、分区 |\\n| 重排 | 百毫秒级 | 减少候选数、换轻模型 |\\n| 生成 | 秒级，占大头 | 流"
+      }
+     },
+     {
+      "step": 6,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案正确给出了拆陈述、逐条溯源、计数相除的核心公式，但掺杂了大量参考资料未涵盖的扩展内容（如Self-RAG标签、测试集比例、工程注意点等），部分信息超出给定资料范围。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 953,
+     "completion_tokens": 59,
+     "total_tokens": 1012
+    }
+   }
+  }
+ },
+ {
+  "id": "q33",
+  "type": "exact",
+  "text": "切块 chunk size 和 overlap 的经验值各是多少？",
+  "gold": [
+   "rag-total-0023",
+   "kb-rag-0022"
+  ],
+  "arms": {
+   "single": {
+    "final": "**经验值（wiki 里的唯一明确口径）**\n\n- **chunk size：512–1024 token**\n  - 技术文档偏小（取 512 附近），保证检索精度；\n  - 法规、合同类偏大（取 1024 附近），保证条款完整；\n  - 另有一条下限：**每块至少 ~100 字**，太短容易被当噪声召回。\n- **overlap：50–100 token，约等于块长的 10%**\n  - 作用是防边界信息丢失（一句话/一条指标被切断后两边都捞不到）；\n  - 滑动窗口切分时的经验值是「重叠 10–20% 够用」，再往上加没收益但要付代价：**重叠到半块会让索引体积翻倍**。\n\n**用这两组数的三条注意事项**（同样来自 wiki，不是可选项）\n\n1. **按文档类型分组配参数，不要全库一个参数**——合同被切碎、网页留大块，是最典型的翻车形态；「全库一个参数」被列为分块五坑之首。\n2. **块长要和 Embedding 模型的最大输入对齐**：上限 512 的模型喂 1024 的块会被静默截断，等于白切。\n3. **每个块必须带元数据**（来源、页码、章节路径、文档 ID）——引用溯源和元数据过滤都靠它，否则命中后说不出来源，也做不了「先过滤再检索」。\n\n补充：如果按上面参数仍不够（单块讲不全、检索常常漏掉主语），下一步不是继续加大 chunk，而是换形态——**父子文档 / Small-to-Big**（小块检索求准、大块生成求全，代价是索引体积翻倍、父块过长还要再截断）、**按结构切分**（能说出「出自第三章第二节」，依赖解析质量），或 **Contextual Retrieval**（给每块补 50–100 token 位置说明）。\n\n依据：[[concept/rag-pipeline]]、[[source/rag-total]]、[[source/kb-rag]]",
+    "usage": {
+     "prompt_tokens": 27125,
+     "completion_tokens": 637,
+     "total_tokens": 27762
+    },
+    "elapsed_ms": 8868.330240249634,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"1-88/88\", \"content\": \"---\\ntitle: 文档处理与 RAG 完整正文（原文摘要）\\ntype: source\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 十九章 RAG 总纲的压缩摘要：定义与适用"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "chunk size 512",
+        "limit": "8"
+       },
+       "read_page": {
+        "path": "source/kb-rag.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:43 — 参数经验值：chunk size 512–1024 token（技术文档偏小保证精度、法规合同偏大保证完整）、overlap 50–100 token（约 10%）、每块至少 100 字（太短易成噪声）、块内元数据写来源/页码/章节路径/文\"]}",
+       "read_page": "OBSERVE {\"path\": \"source/kb-rag.md\", \"lines\": \"1-70/70\", \"content\": \"---\\ntitle: 文档处理与 RAG 主题总览（问答清单 + 方案取舍）\\ntype: source\\nsources: [raw/kb-rag.md]\\nupdated: 2026-11-12\\nsummary: 一份把 RAG 问题清单、六种检索形态速"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料中 chunk size 512–1024 token、overlap 50–100 token（约10%）及最小块长100字等核心要点，并补充了合理注意事项，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 789,
+     "completion_tokens": 60,
+     "total_tokens": 849
+    }
+   }
+  }
+ },
+ {
+  "id": "q34",
+  "type": "exact",
+  "text": "MinerU Hybrid 方案里 Pipeline 和 VLM 怎么分工？",
+  "gold": [
+   "kb-rag-0019"
+  ],
+  "arms": {
+   "single": {
+    "final": "Wiki 里有明确记录的只有一句核心分工，其余按要求「有几分说几分」补全，并标明哪些是推断。\n\n## 知识库里的原文口径\n\n**MinerU Hybrid 的分工是一句：本地 Pipeline 负责版面解析，复杂页交给 Qwen-VL 的 VLM。**\n\n- **Pipeline 端（本地、便宜、稳）**：在本地做版面/结构解析——切分正文、标题、表格、图文混排的版面区域，把 PDF 还原成带结构的信息。放在本地跑，成本与延迟可控。\n- **VLM 端（外部 API、贵、慢、理解好）**：只对\"复杂页\"兜底，用 Qwen-VL 这类多模态模型做理解型解析。\n- **收益**：表格与图文混排还原好，适合真实企业 PDF（ESG-Extractor 项目即走这条）。\n- **代价**：外部 API 的成本与延迟；且它比纯本地方案多一条链路要维护。\n\n同页还有一条相关的分工原则：**少量关键页可以只走 VLM**——上下文理解更好，但贵且慢，所以是\"按页选路\"而不是全量走 VLM。这与\"本地 Pipeline 打底、VLM 兜底\"是同一个判断。\n\n## 为什么这么分（机制层的理由，来自 wiki 的解析环节取舍）\n\n1. **解析决定检索上限**：离线六环节里解析与分块决定上限，解析错了后面重排、换 Embedding 都救不回来（表格塌成一行、双栏串行、扫描件整页空白）。所以主链路不能省，只能力求稳。\n2. **表格必须保结构**：三条做法是解析时识别边界、切分时整表成块或按行切且每行重复表头、入库时把表名与列名写进块文本。Pipeline 负责第一步，后续结构与表头信息要靠它输出。\n3. **成本结构决定分工**：外部 API 的成本与延迟是这条方案唯一代价，因此把 VLM 限定在\"复杂页/少量关键页\"，而不是全库跑。\n\n## 一句面试口径\n\n> MinerU Hybrid 是\"本地版面解析打底 + 复杂页 VLM 兜底\"的混合方案：Pipeline 把绝大多数页面的版面、表格、图文混排结构化地还原出来，成本与延迟内控；只有版面复杂、纯规则解不准的页才调 Qwen-VL 的 VLM 做理解型解析。代价是外部 API 的成本与延迟，以及多一条链路的维护。\n\n## 边界说明\n\nwiki 里就这一段记载，**没有**更细的分流规则（比如什么阈值算\"复杂页\"、Pipeline 内具体用哪个版面模型、两者结果如何合并对齐）。如果你要的是这些实现细节，需要回原文或 MinerU 官方文档核实，我不做编造。相关旁证：PaddleOCR（PP-OCRv6，GPU）是另一条路——中文 OCR 强，用来注入原解析流程处理扫描件，代价同样是多一条链路。\n\n依据：[[concept/rag-pipeline]]、[[source/kb-rag]]、[[source/rag-total]]",
+    "usage": {
+     "prompt_tokens": 29999,
+     "completion_tokens": 898,
+     "total_tokens": 30897
+    },
+    "elapsed_ms": 12355.178117752075,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       },
+       "search_wiki": {
+        "query": "MinerU"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1",
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:6 — summary: 从文档解析（MinerU Hybrid / PaddleOCR）到结构感知切分、BGE-M3 与版本化更新、混合检索加 HyDE、chunk↔原文映射，给出每段的选型理由、代价与失效边界；附在线七步、离线六环节、三种相似度\", \"concept/rag-pipeline.md:24 — "
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "kb-rag.md",
+        "offset": "0",
+        "limit": "60"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# kb-rag.md 行 1-60 / 379\\n# 03-文档处理与RAG\\n\\n> 主题文档。问题清单、方案对比、我的取舍都放在这一份里，不再分层。\\n> 逆向项目或模拟面试时，把「问题清单」整段复制出去当题面，或直接用 [[02-AI/AI知识库/index|index]]。\\n> 状态：问题与要点已并入（2026-10-23 合并）；2026-1"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "Pipeline"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-rag-eval-metrics.md:57 — 依据：[[source/rag-total.md]]、[[concept/rag-pipeline.md]]、[[concept/hybrid-retrieval.md]]\", \"concept/rag-pipeline.md:24 — - **MinerU Hybrid**（本地"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料中 Pipeline 本地负责版面解析、VLM 走 Qwen-VL API 兜底复杂页的核心分工，并说明成本与延迟代价及适用场景，未编造关键细节。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 961,
+     "completion_tokens": 56,
+     "total_tokens": 1017
+    }
+   }
+  }
+ },
+ {
+  "id": "q35",
+  "type": "exact",
+  "text": "扫描件图片型 PDF 用什么 OCR 处理？",
+  "gold": [
+   "kb-rag-0020"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：扫描件/图片型 PDF 走 PaddleOCR（PP-OCRv6，GPU），OCR 后再接与电子 PDF 相同的结构感知切分流程。**\n\n## 1. 主选：PaddleOCR\n- 中文 OCR 能力强，把它作为前置步骤注入原有解析流程，识别出的文本再交给版面/结构解析处理。代价是多一条链路（多一个模型、多一套 GPU 依赖）。依据：[[source/kb-rag]]、[[concept/rag-pipeline]]\n- 用 GPU 版（PP-OCRv6），因为整页扫描件串行 OCR 时用 CPU 跑会拖慢离线六环节。\n\n## 2. 可选补强：少量关键页直接交给 VLM\n- 上下文理解好、表格与图文混排还原更准，但贵且慢，所以只对「重要但 OCR 效果差」的少数页做，不要全库跑。依据：[[concept/rag-pipeline]]\n\n## 3. 企业级真实 PDF 的折中：MinerU Hybrid\n- 本地 Pipeline 解版面 + 复杂页走 Qwen-VL 的 VLM，表格与图文混排还原好，适合图文混排的扫描件；代价是外部 API 成本与延迟。若文档混合了电子页与扫描页，这条路线比「先全量 OCR」更省事。依据：[[source/kb-rag]]\n\n## 4. 不要用于此场景的处理方式\n- LightRAG / Neo4j 图抽取：保留实体关系但**不擅长精确原文还原**，扫描件走它拿不到可靠正文。\n- 直接 pdfplumber / PyMuPDF 抽文本：图片型 PDF 抽出来是整页空白——这是解析环节最典型的「后面全错且无法补救」情形。\n\n## 5. 后处理与验收（OCR 特有）\n- **清洗**：去页眉页脚页码（否则成 BM25 高频噪声）、合并被换行切碎的句子、保留标题层级。\n- **中文四特殊**：分词边界（专名被切碎导致 BM25 召不到，需领域词典或字符级 BM25）、全角半角归一、段落无标点（改结构切分）、表格跨页按续表标识合并。依据：[[concept/rag-pipeline]]\n- **验收三条**里的关键一条：抽三个扫描页看 **OCR 错字率**，不验收就入库是后续「召回不准」的根源。\n- 表格不要交给 OCR 的纯文本流：解析时识别表格边界，切分时整表成块或按行切且每行重复表头，入库时把表名与列名写进块文本。\n\n## 6. 一句话选型口径\n解析与分块决定检索上限，后面换 Embedding、加重排都只能在已入库的（可能是错的）候选里挑——扫描件宁可多花一条 OCR 链路的钱，也别指望后段补救。\n\n依据：[[source/kb-rag]]、[[concept/rag-pipeline]]、[[source/rag-total]]",
+    "usage": {
+     "prompt_tokens": 26317,
+     "completion_tokens": 810,
+     "total_tokens": 27127
+    },
+    "elapsed_ms": 10189.393520355225,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/kb-rag.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/kb-rag.md\", \"lines\": \"1-70/70\", \"content\": \"---\\ntitle: 文档处理与 RAG 主题总览（问答清单 + 方案取舍）\\ntype: source\\nsources: [raw/kb-rag.md]\\nupdated: 2026-11-12\\nsummary: 一份把 RAG 问题清单、六种检索形态速"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"1-88/88\", \"content\": \"---\\ntitle: 文档处理与 RAG 完整正文（原文摘要）\\ntype: source\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 十九章 RAG 总纲的压缩摘要：定义与适用"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料的核心要点（扫描件/图片型PDF用PaddleOCR PP-OCRv6 GPU，VLM仅用于少量关键页），并补充了相关选型细节，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 925,
+     "completion_tokens": 58,
+     "total_tokens": 983
+    }
+   }
+  }
+ },
+ {
+  "id": "q36",
+  "type": "exact",
+  "text": "文档更新后 Embedding 同步有哪三种做法？",
+  "gold": [
+   "rag-total-0031",
+   "kb-rag-0024"
+  ],
+  "arms": {
+   "single": {
+    "final": "文档更新后 Embedding 同步的三种做法（增量更新三法）：\n\n1. **全量重建**——最简单直接，但大库耗时，且重建期间服务不可用。\n2. **按文档 ID 定点替换**——只删/写变动文档对应的向量，代价是要维护稳定、可复用的文档 ID。\n3. **collection 版本化（版本化重建）**——新建一个 collection 灌入新版本、切换后回滚旧版；可追溯可回滚，代价是空间翻倍（同一份数据两份存储）。\n\n选择建议与坑：工程上文档更新走 **collection 版本化重建**而不是全量重灌；最常犯的错误是「只加不删」——新旧两版块一起被召回，模型可能拿到过期条款。\n\n补充一条相关铁律：Embedding 同时作用于索引端与查询端，**两端必须同模型同预处理**；若做了微调，模型与索引绑定，换模型必须整库重建。\n\n依据：[[concept/rag-pipeline]]、[[source/kb-rag]]、[[source/rag-total]]",
+    "usage": {
+     "prompt_tokens": 12146,
+     "completion_tokens": 332,
+     "total_tokens": 12478
+    },
+    "elapsed_ms": 5599.251985549927,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       },
+       "search_wiki": {
+        "query": "Embedding 更新"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1",
+       "search_wiki": "OBSERVE {\"hits\": []}"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖参考资料中的三种做法及各自代价，并准确复述了'只加不删'的错误提示，无编造内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 538,
+     "completion_tokens": 41,
+     "total_tokens": 579
+    }
+   }
+  }
+ },
+ {
+  "id": "q37",
+  "type": "exact",
+  "text": "有重排和无重排时 Top-K 的取值各怎么定？",
+  "gold": [
+   "rag-total-0056",
+   "kb-rag-0030"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：Top-K 要分两段定：粗排阶段放大、精排之后收敛。**\n\n## 一、有重排（Rerank）\n\n- **粗排召回：Top-50 起**，即 RAG 在线七步中的「重排候选 20–100」。^[raw/kb-rag.md]^[raw/rag-total.md]\n- **精排后进入 prompt：3~8 条**。四段流程可写成 `topM → topN → RRF topP → Rerank topK(3–8)`：粗排负责召回率，精排负责准确率。\n- 精排效果再好，也受候选上限约束：候选数超过重排模型上限时要先截断；**召回阶段没捞出来的，精排救不回**。\n\n## 二、没有重排\n\n- **K 不能放大**：经验规则是「**有 Rerank 才能放大 K；没有则放大会直接掉准确率**」。因为没有二维交叉打分把噪声压下去，K 大只会让无关块稀释注意力、推高 token 成本。\n- 无重排时只能靠单段 Top-K（通常沿用召回阶段的较小值，拿准确率换一点召回），并把力气改到检索前：查询改写/拆分、元数据先过滤再检索、切分与解析质量。生成侧「注入块数从十降到五」也是这一类调参。\n\n## 三、两端的代价与调参提示\n\n| 取值 | 后果 |\n|---|---|\n| K 太小 | 漏召回，生成无依据，守规则的模型大量拒答 |\n| K 太大（无重排） | 噪声稀释注意力、成本上升、准确率下降 |\n| K 太大（有重排） | 主要是在重排环节加延迟（重排为百 ms 级，远小于生成秒级），可接受 |\n\n- 成本结构可作为依据：查询 Embedding 与检索重排算力通常可忽略，**注入与生成 token 是大头**，因此最终进 prompt 的条数（3~8）才是成本杠杆，粗排 K 不是。\n- HNSW 的 `ef` 与检索 limit 挂钩（取 limit 的 4–10 倍起步），改 K 时 `ef` 要一起调；`ef` 是线上唯一该调的参数。\n- 拒答分层可以用置信度合成，比如最高重排分数、命中块数、命中块分散程度，所以在有重排的架构里，K 与阈值要成对定。\n\n一句话：**有重排就把召回开到 50 以上、出口收到 3~8；没有重排就小 K 单段、靠检索前加工与更少注入块保精度。**\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]",
+    "usage": {
+     "prompt_tokens": 13333,
+     "completion_tokens": 718,
+     "total_tokens": 14051
+    },
+    "elapsed_ms": 8094.520330429077,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖参考资料中“有重排粗排50左右、精排后3~8条；无重排取3~5、放大K会掉准确率”的核心要点，并正确说明原因与代价，无实质性编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 988,
+     "completion_tokens": 63,
+     "total_tokens": 1051
+    }
+   }
+  }
+ },
+ {
+  "id": "q38",
+  "type": "exact",
+  "text": "GraphRAG 查询期怎么区分局部问题和全局问题？",
+  "gold": [
+   "rag-total-0087",
+   "retrieval-paradigm-0006"
+  ],
+  "arms": {
+   "single": {
+    "final": "## 结论\n\nGraphRAG 区分局部问题和全局问题，实际依据是**「答案是否存在于任何单个片段里」**：这决定查询走哪条路，也决定图结构在查询时具体起什么作用。两者的判定与机制对比如下：\n\n| | 局部查询（local） | 全局查询（global） |\n|---|---|---|\n| 问题形态 | 单跳或少数跳的事实型：「X 是什么关系」「这个实体怎么处理」 | 整体归纳型：「这批材料的主题是什么」「主要风险有几类」「跨全部文档的共性是什么」 |\n| 答案位置 | 存在于某一块或某几块里，可以定位 | **不在任何一块里**，本质是摘要任务，必须跨整个语料归纳 |\n| 靠什么回答 | 向量或关键词召回片段，再沿图中实体与边扩展一两跳，拿到有出处的关系证据 | 读取索引期预写好的**社区摘要**（按关系密度聚类形成的层级社区，每层摘要相当于物化视图），自下而上或分层次汇总 |\n| 查询代价 | 常规检索量级 | 20 秒起步，单次读几十万 token |\n| 强弱 | 单跳细节上论文自己承认向量 RAG 更强 | 这是 GraphRAG 真正治的场景，向量 RAG 在这里结构性失效 |\n\n**判定的三条实用口径：**\n\n1. **答案能不能落在某一块里？** 能，就是局部问题；需要「读完所有块才能说」的，就是全局问题。\n2. **问题里有没有「整体、主要、共性、趋势、归纳」这类词？** 有，偏全局；问「某个实体、某个条款、某个数值」，偏局部。\n3. **即使换成向量 RAG，能不能答出同样的结果？** 局部问题的答案向量 RAG 也能给出，甚至更好，图只是让结果更有依据；全局问题向量 RAG 必然答不出，因为答案不在任何块里，这才是上图的正当理由。\n\n**边界提醒：** GraphRAG 常被宣传成多跳关系推理的解法，但它真正的价值在于回答「这批材料的主题是什么」这类摘要任务。所以判断要不要付建图代价（约 100 万 token 语料建图 281 分钟）的正当理由是「问题属于全局归纳类、知识库超过 500 页、语料基本静态」，而不是「需要多跳」。反过来说，库里局部问题占绝大多数时，图主要是用来给局部查询做有出处的扩展，全局查询那套社区摘要就属于纯增量成本。^[raw/retrieval-paradigm.md]\n\n**路由建议：** 不要二选一，按问题类型分流——局部问题导向「向量找入口、图做一两跳扩展」，同时限制关系类型与跳数；全局问题导向社区摘要。LazyGraphRAG 这类思路能把全局侧的索引成本进一步压低，但未进开源库。^[raw/rag-total.md]\n\n依据：[[entity/graphrag]]、[[concept/retrieval-paradigm]]、[[concept/retrieval-selection]]",
+    "usage": {
+     "prompt_tokens": 39449,
+     "completion_tokens": 1048,
+     "total_tokens": 40497
+    },
+    "elapsed_ms": 14375.916242599487,
+    "steps": 6,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "search_wiki"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "全局查询",
+        "limit": "10"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/retrieval-paradigm.md:45 — - GraphRAG：约 100 万 token、600 token 窗口、1,669 块、16GB 虚拟机，建图 281 分钟（约每分钟 3,600 token 抽取吞吐）；全局查询 20 秒起、单次读几十万 token。\", \"entity/graphrag.md:21 — - 实测：6"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "rag-total.md",
+        "offset": "0",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 1-200 / 1233\\n# 文档处理与RAG\\n\\n> 建立日期：2026-11-09　｜　重写：2026-11-09 按「一份文档写满所有标题」的要求重做，原两份机制长文的内容全部并入本文件，原件已删\\n> 对应 [[02-AI/AI知识库/文档处理与RAG|AI知识库 / 文档处理与RAG]]\\n> 定位：这个模块"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "社区摘要 实体 关系 抽取",
+        "limit": "10"
+       },
+       "read_page": {
+        "path": "concept/retrieval-selection.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": []}",
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-selection.md\", \"lines\": \"1-50/50\", \"content\": \"---\\ntitle: 检索方案选型三步判定与混合治理\\ntype: concept\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-12\\nsummary: 先数页数、"
+      }
+     },
+     {
+      "step": 5,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料中局部检索与全局检索的核心区分：局部问题面向具体实体、用向量/关键词定位并沿边扩展；全局问题面向归纳性主题、依赖社区摘要逐层归并，且补充的判定口径与代价边界均与原文一致，无编造内容。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1348,
+     "completion_tokens": 74,
+     "total_tokens": 1422
+    }
+   }
+  }
+ },
+ {
+  "id": "q39",
+  "type": "semantic",
+  "text": "两路召回的分数没法直接相加，怎么合并才不让量纲大的那一路说了算？",
+  "gold": [
+   "rag-total-0042",
+   "rag-total-0041"
+  ],
+  "arms": {
+   "single": {
+    "final": "核心答案在 [[concept/hybrid-retrieval]] 的「融合的三种做法」与「Top-K 两段式」两节，配合 [[concept/rag-pipeline]] 的检索段。\n\n## 结论\n\n两路召回（比如向量相似度得分在 0~1 之间，BM25 得分是无上界的实数）**不要直接相加，按下面顺序处理**：\n\n**首选：RRF（Reciprocal Rank Fusion），只用名次，不碰分数**\n\n$$score(d)=\\sum_{r\\in\\{\\text{向量},\\text{BM25}\\}}\\frac{1}{k+\\text{rank}_r(d)}$$\n\n- 因为只使用排名，两路的量纲差异就被完全绕开了，也不需要归一化。**k 不是用来调准确率的参数**，它改变的是名次衰减速度；k=60 是社区经验值（出自 Cormack 等 2009 SIGIR）。\n- 代价是：弱路排在尾部的噪声也会被一起带进来，所以两路候选数不要放得太宽，建议设为同一量级（例如各取 top-50）。\n\n**次选：加权求和，但必须先归一化**\n\n- 需要对每一路分别归一化再融合（min-max、z-score，或者按该路 top-K 的分数做截断归一），权重按语料调——中文专有词、业务黑话多的语料给 BM25 更高权重；同义改写型问法为主的语料，BM25 权重应压到接近 0（这种场景下 BM25 增量接近零）。\n- 归一化不能拿全库分数做统计，否则新文档入库会改变历史归一化基准，分数会漂移。\n\n**效果最好但需要标注数据：学习式融合（LambdaMART 等）**，把两路分数 + 名次 + 其他特征一起喂给 LTR 模型。\n\n**真正的“合并归位”交给第三层：交叉编码器精排**\n\n- 融合只是避免量纲不对称导致某一路占主导，真正的质量提升靠精排。原因：粗排只是一维判断，它把 query 和文档各压成一个向量，只比较一条轴上的距离；cross-encoder 则是二维判断，它把 query 与文档拼成一条序列，让每个 token 与对方每个 token 互相 attend，判的是“条件成不成立”而不是“像不像”。\n- Top-K 采用两段式：先通过粗排放大召回（top-50 起），再通过精排收敛到进入 prompt 的 3~8 条。**有 Rerank 才能放大 K；没有 Rerank 时放大会直接掉准确率。**\n\n## 落位建议\n\n- 如果两路分属两个库（例如 [[entity/chroma]] 只存密集向量），就要在应用层做 RRF 合并；[[entity/qdrant]] 原生支持稀疏向量（`SparseVector{indices, values}` + 倒排索引），配合多向量配置，可在同一 Collection 内同时存放密集向量与 BM25/SPLADE 类稀疏向量，融合前不必跨库 join——这是选库时比的实质差异。\n- 注意候选截断：候选数超过重排上限要先截断；**召回阶段没捞出来的，精排救不回来**。\n\n## 别指望合并能救的失效边界\n\n- 中文分词不补专有词 → BM25 对业务黑话基本无效；\n- 分块把表格切断 → 两路都救不回；\n- 多跳问题单条打分不够 → 要换检索形态，见 [[concept/retrieval-paradigm]] 的融合四条路；\n- 多一路索引 + 一层精排，延迟与维护成本都会上升。\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]、[[concept/retrieval-paradigm]]、[[entity/qdrant]]",
+    "usage": {
+     "prompt_tokens": 12218,
+     "completion_tokens": 956,
+     "total_tokens": 13174
+    },
+    "elapsed_ms": 8611.544609069824,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心要点：以RRF为首选并解释其绕开量纲问题、k参数的作用、代价，以及加权求和需归一化、学习式排序需标注等三种做法的对比，无实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1283,
+     "completion_tokens": 61,
+     "total_tokens": 1344
+    }
+   }
+  }
+ },
+ {
+  "id": "q40",
+  "type": "semantic",
+  "text": "用户问得特别口语、还带着前文指代，原样拿去检索命中很差",
+  "gold": [
+   "rag-total-0044",
+   "rag-total-0067"
+  ],
+  "arms": {
+   "single": {
+    "final": "# 口语化、带前文指代的查询怎么救\n\n结论先说：**这属于查询侧加工问题，不是检索算法问题**。RAG 链路中，查询处理是第一步，且必须在检索与重排之前完成；口语化、指代消解都该在这一步解决，重排无法救回未召回的块。^[concept/rag-pipeline.md]\n\n## 一、病因：三个独立问题叠加\n\n| 现象 | 本质失效点 |\n|---|---|\n| 「它」「那个」等指代 | 查询字符串本身脱离上下文时就有歧义，与检索算法精度无关 |\n| 口语化（废话、语气词、不完整句） | 向量检索能吸收部分说法差异，但 BM25 这路会被口语噪声带偏 |\n| 前文省略的主语和限定 | 需要对话状态，单条 query 不包含这些信息 |\n\n关键判断句：**多轮查询失效的原因在于「它」脱离上下文后本身有歧义，检索算法本身没有问题。**^[concept/rag-pipeline.md]\n\n## 二、三条做法与选型\n\n1. 把历史拼接进查询：最省事，但噪声变多，且越拼越长会稀释相关性。\n2. **先改写为独立查询（工程默认做法）**：用一次 LLM 调用把口语化、带指代的问句转成自足、信息完整的检索 query，多花一次模型调用与一点延迟。\n3. 对话状态加槽位：把「已确认事实、当前目标、已排除选项」这三样单独存起来，改写时注入。^[concept/rag-pipeline.md]\n\n后两条可以叠加：槽位给改写提供结构化上下文，改写产出干净的 query。超过五轮要做压缩，**优先压背景、保已确认参数**。^[concept/rag-pipeline.md]\n\n## 三、查询侧四种加工的优先级（顺序不要乱）\n\n判断顺序：**先改写（最便宜、收益最稳）→ 再拆分（复合问题）→ 最后 HyDE（收益大、风险也大）**。^[concept/rag-pipeline.md]\n\n口语化问题、指代问题全部落在第一格。别一上来就上 HyDE：它会生成假想答案文档，对「指代不清」没帮助，还可能引入噪声。\n\n## 四、改写的两个配套细节\n\n- **改写要与混合检索配合**：BM25 那一路对口语和同义词基本无效（中文分词不补专有词，业务口语近似无效），所以改写后最好同时产出「语义版 query」和「关键词版 query」，分别交给两路召回，再用 RRF 融合。^[concept/hybrid-retrieval.md]\n- **症状对照**：如果表现为「明明有资料却说没有」，先查的正是「阈值过高、top_k 过小、**同义改写未覆盖**」这条；不是说改写流程没做，而是改写的覆盖面不够。^[concept/rag-production.md]\n\n## 五、工程上要留的验收\n\n- 改写是一次额外 LLM 调用，属于**首字延迟**的一部分，要计入监控的四条曲线之一；降级路径上应有「改写超时则回退为原始 query 与近期历史直接拼接」的兜底。^[concept/rag-production.md]\n- 评估集里要专门放一档「带指代的多轮问句」，改动前后跑同一批，否则改写质量下降时测不出来。^[concept/rag-production.md]\n\n一句话：**先做指代消解式的 query 改写（配合槽位状态），改写结果同时喂向量路和 BM25 路；HyDE、拆分是后面的事，不是这件事的解药。**\n\n依据：[[concept/rag-pipeline]]、[[concept/hybrid-retrieval]]、[[concept/rag-production]]",
+    "usage": {
+     "prompt_tokens": 36369,
+     "completion_tokens": 1054,
+     "total_tokens": 37423
+    },
+    "elapsed_ms": 12291.459083557129,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/hybrid-retrieval.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/hybrid-retrieval.md\", \"lines\": \"1-52/52\", \"content\": \"---\\ntitle: 混合检索与重排：两路召回、RRF 融合、交叉编码器精排\\ntype: concept\\nsources: [raw/kb-rag.md, raw/qdrant.md]\\nupdated: 2026-02-14\\nsu"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "query": "改写"
+       },
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/hybrid-retrieval.md:6 — summary: 向量管语义改写、BM25 管精确串，RRF 绕开两路量纲差异，交叉编码器把「像」变成「对」；附融合与重排的三种做法、Top-K 两段式、单库双路实现与各自失效边界。\", \"concept/hybrid-retrieval.md:12 — **两路召回 + RRF 融合 + 交叉编",
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案核心覆盖参考资料：先改写独立查询为工程默认、顺序改写→拆分→HyDE、历史拼接的噪声代价、槽位叠加，均与参考一致，无明显编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1281,
+     "completion_tokens": 51,
+     "total_tokens": 1332
+    }
+   }
+  }
+ },
+ {
+  "id": "q41",
+  "type": "semantic",
+  "text": "切块切得太碎召回全是噪声，切得太大相关内容被稀释，怎么定一个度？",
+  "gold": [
+   "rag-total-0025",
+   "rag-total-0021"
+  ],
+  "arms": {
+   "single": {
+    "final": "# 怎么定「块切多大」这个度\n\n先说结论：**不存在一个全局最优的 chunk size，「度」不是调出来的一个数，而是一条判据加一套组合拳。** 判据是「每块单独拿出来，能不能构成一个自洽、有主语、能被回答的语义单元」；组合拳是「按文档类型分组配参数 + 小块检索大块生成 + 用 Recall 而不是体感来验收」。\n\n## 一、定位问题：你说的两种症状其实是两回事\n\n- **切碎了召回噪声多**：块内信息太少，向量表达不完整，任何沾边的查询都能命中它（短块天然相似度平平，挤进 Top-K），且块里缺主语，「上涨 15%」不知道是谁上涨。\n- **切大了相关内容被稀释**：一个块里混了五件事，向量是这几件事的平均值，跟任何一个具体问题的距离都不近；命中后注入上下文又让注意力被无关段落稀释。\n\n所以不是同一个旋钮的两端，中间那个「刚好」的位置很窄。这也是为什么只调 size 往往调不出满意结果——**要换结构，不是换数字。**\n\n## 二、先定一个可用的基线（不是答案，是起点）\n\n给你的第一版参数就直接用这组，别从零摸索：\n\n- **chunk size 512–1024 token**，overlap **50–100 token（约 10%）**；overlap 再大意义不大，半块重叠会让索引体积翻倍。\n- **每块至少 100 字**——低于这个长度基本就是噪声源。\n- 切分算法默认用**递归字符切分**（段落→换行→句号→空格逐级降级），成本极低、工程默认；只有在课程转录、访谈这类口语语料上才值得上语义切分（要多跑一遍 Embedding）。\n- **每块必带元数据**：来源、页码、章节路径、文档 ID。引用溯源和「先过滤再检索」都靠它，缺了命中后连「出自哪」都说不出来。\n\n## 三、真正的关键：按文档类型分组配参数，不要全库一个值\n\n你现在的「度」如果是一个全局常数，那就注定是折中值，两头都不舒服。正确做法是分组：\n\n- **技术文档 / 手册 / API 文档**：偏小（512 左右），追求精度，因为答案是局部的、结构化的。\n- **法规、合同、条款**：偏大（1024 甚至整条/整节成块），追求完整性，因为切碎了条款就失去适用条件（前置条件丢一半的合同条款比召不回来更危险）。\n- **网页 / 博客 / 新闻**：结构松散，递归切分 + 中等大小。\n- **表格**：不按长度切，按语义切——整表成块，或按行切且每行重复表头，并把表名列名写进块文本。\n\n「合同被切碎、网页留大块」正是全库统一参数的典型后果。\n\n## 四、如果基线还是两边不满足：换结构，别继续调数字\n\n针对你描述的两个症状，对应的不是 size 调整，而是这三条：\n\n1. **父子文档 / Small-to-Big（首推）**——直接解决「准和全」的矛盾：**用小块（甚至单句级）建索引检索求准，命中后返回它的父块（整节/整段）给模型求全**。噪声多是因为检索单元太大太杂、稀释是因为给模型的单元太小太杂，这招把两个单元分开。代价是索引体积翻倍，父块过长还要再截断；改动量小，收益最直接。\n2. **结构感知切分**——按标题层级和表格边界切，保证表格不被切断、指标可对齐，并能说出「出自第三章第二节」。依赖解析质量，但只要你的源文档有结构（PDF/Word/HTML），这是比按长度切更合理的「度」的定义：**以语义边界为度，而不是以 token 数为度**。前提是解析过关——解析错了（表格塌成一行、双栏串行）后面怎么切都白费。\n3. **Contextual Retrieval（如果症状是「块里缺主语」）**——给每块在索引期补 50–100 token 的位置说明（「本块出自 XX 公司 2023 年报第三节，讨论毛利率」），让块自己说清自己是谁。它是把「块太小所以不自洽」这个问题在写入端补回来，而不是把块变大。公开数据：top-20 失败率 5.7% → 1.9%。\n\n另外两条辅助：**分层索引**（句/段/文档三层，先定位在哪节再读那节）适合超大文档；**Agentic 分块**最贵，只在结构极不规范且文档量小时才试。\n\n## 五、怎么验收这个「度」——不要靠体感\n\n这是最容易跳过、也最决定成败的一步：\n\n1. **先分清是切分的问题还是 Embedding 的问题。** 抽二十对「问题—应命中片段」看 Top-5 命中率：**低于六成先怀疑 Embedding（领域失配比维度不足更常见），别急着改切分。** 这一条能省掉大量无效调参。\n2. **调检索层看 Recall 而不是看答案好坏。** 召回没捞到的，重排救不回；只用「答非所问」的体感判断会来回摇摆。评估集 20–50 条，分常规/边界/对抗三组，且**必须有无答案样本**，否则测不出拒答；调参样例和测试样例分开。\n3. **每轮只切一个变量**，收益和代价一起记（结构切分这类改动的对照口径是「证据完整率、引用定位正确率、索引体积」三项一起看，因为变大变小总有一项变差）。\n4. **先用混合检索 + Rerank 兜一层。** 很多时候「碎块噪声多」在 RRF 融合 + 交叉编码器重排后会明显缓解——粗排负责召回率、精排负责准确率。同时两路都要设最低分阈值，不设阈值候选集会被噪声撑满。\n5. **别用「无重排时放大 top_k」来补偿召回**，这会直接掉准确率。\n\n## 六、一句话可执行版\n\n> 全库先用 512–1024 token / overlap 10% / 每块 ≥100 字 + 完整元数据跑通；**按文档类型分组**再各调各的；仍然两边不满足就上**父子块（小块检索、大块生成）**；块里缺主语就上 Contextual Retrieval；表格一律整表成块或按行重复表头。验收顺序是**先查 Embedding（Top-5 命中率 < 60% 先换模型）→ 再看切分 → 最后才动 prompt**——顺序反了会在提示词上反复调，而问题其实在切分。\n\n依据：[[concept/rag-pipeline]]、[[concept/rag-production]]、[[source/rag-total]]、[[entity/contextual-retrieval]]、[[concept/hybrid-retrieval]]、[[source/kb-rag]]",
+    "usage": {
+     "prompt_tokens": 42570,
+     "completion_tokens": 1889,
+     "total_tokens": 44459
+    },
+    "elapsed_ms": 17304.11458015442,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "source/rag-total.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"source/rag-total.md\", \"lines\": \"1-88/88\", \"content\": \"---\\ntitle: 文档处理与 RAG 完整正文（原文摘要）\\ntype: source\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 十九章 RAG 总纲的压缩摘要：定义与适用"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-selection.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-selection.md\", \"lines\": \"1-50/50\", \"content\": \"---\\ntitle: 检索方案选型三步判定与混合治理\\ntype: concept\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-12\\nsummary: 先数页数、"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_raw"
+      ],
+      "args": {
+       "read_raw": {
+        "path": "rag-total.md",
+        "offset": "300",
+        "limit": "200"
+       }
+      },
+      "observe": {
+       "read_raw": "OBSERVE {\"content\": \"# rag-total.md 行 301-500 / 1233\\n| 无重叠 | 关键句落在边界，两边都缺 | 加 10% 重叠 |\\n| 块过长 | 噪声进上下文，注意力被稀释 | 上限硬约束，超出走父子块 |\\n| 不带元数据 | 命中后说不出来源 | 入库时写入来源与页码 |\\n\\n---\\n\\n## 五、Embedding：决定能不能被找回\\n\\n"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖了参考资料的核心要点（分组配参数、表格整体成块、约10%重叠、块过长硬约束走父子块、元数据入库），并在此基础上围绕问题展开可执行的度量方法，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 2088,
+     "completion_tokens": 62,
+     "total_tokens": 2150
+    }
+   }
+  }
+ },
+ {
+  "id": "q42",
+  "type": "semantic",
+  "text": "评估方案里哪些指标要标准答案、哪些可以不要人工参与？",
+  "gold": [
+   "rag-total-0074"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：评估方案可以按两轴切分——「要不要标准答案」和「要不要人工」；两轴大体正交，但凡是覆盖/召回类指标，都得先有 gold 撑住。**\n\n## 一、必须要标准答案（gold）的指标\n\n判据：指标算法里出现「从标准答案抽信息点去核对」这一步的，没 gold 就跑不动。\n\n| 指标 | 为什么离不开 gold |\n|---|---|\n| Context Recall | 算法是从标准答案里抽信息点，再逐点查是否出现在召回结果中，没有 gold 无从抽点 |\n| RAGAs 端到端 | 必须四字段：问题、召回上下文、模型回答、标准答案 |\n| 命中率 / MRR / 端到端准确率式对照实验 | 做「只向量 / 只 BM25 / RRF / 叠 Rerank」四组对照时，必须固定 gold 才有可比性 |\n\n## 二、可以不要标准答案的指标\n\n判据：这些指标判的是「回答↔资料」「资料↔问题」的成对关系，不是「回答↔标准答案」的相似度。\n\n- **Context Precision**：逐个判 top-k 是否相关、越靠前权重越高，不需要先知道答案。\n- **Context Relevancy**：模型判召回内容与问题是否偏题。\n- **Faithfulness**：把回答拆成独立陈述，逐条问「能否仅从给定资料推出」。\n- **Answer Relevancy**：看是否覆盖问题各维度、有无多余内容。\n- 另外，拒答能力、成本/延迟也属这一类（但要有「无答案样本」才测得出来）。\n\n## 三、可以不要人工的环节\n\n- **LLM 当裁判**：可自动化、能按自定义标准评；缺点是有偏好，上线前抽检校准一次即可。\n- **规则匹配**：客观可重复，能查精确项——引用编号是否真实存在、是否带来源、是否拒答、格式是否合规。\n- **RAGAs 跑分**：gold 由人提供后，打分本身是模型做的，日常回归无需人盯。\n- **监控四条曲线**：检索命中率、拒答率、首字延迟、单次 token。四条同看能定位故障（命中率跌+拒答率涨＝召回坏；命中率正常+拒答率涨＝提示词或阈值坏）。\n\n## 四、人工只该花在三处\n\n1. **造标准答案**（Context Recall 与 RAGAs 的地基）：从真实提问抽 20–50 条，每条三字段（问题、应命中的证据来源、标准答案），配比常规 ~90%、边界（含无答案/歧义）5–10、对抗（跨段拼）5–10。\n2. **裁判校准抽检**：校准 LLM 裁判的偏好。\n3. **解析/切分抽样验收**：抽二十页看串栏、五张表看表头是否同块、三个扫描页看 OCR 错字率——这是指标掉了回溯的第一现场。\n\n## 五、两个易漏条件\n\n- 没有无答案样本，就测不出拒答能力；而拒答本身是规则匹配可全自动判的。\n- 调参样例与最终测试样例必须分开，否则等于背答案。\n\n**一句话分工**：要标准答案的＝覆盖/召回类；不要标准答案的＝相关性、忠实度、拒答与成本类；不要人工的＝RAGAs 跑分、LLM 裁判、规则匹配、监控曲线；必须人工的＝造 gold、校准裁判、解析验收。\n\n依据：[[answers/answer-rag-eval-metrics]]、[[concept/rag-pipeline]]",
+    "usage": {
+     "prompt_tokens": 13224,
+     "completion_tokens": 908,
+     "total_tokens": 14132
+    },
+    "elapsed_ms": 7946.492671966553,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案按「是否要标准答案」「是否要人工」两轴切分，覆盖了参考资料中RAGAs、LLM裁判、人工评估、规则匹配的核心要点，分类合理，无实质性编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1058,
+     "completion_tokens": 56,
+     "total_tokens": 1114
+    }
+   }
+  }
+ },
+ {
+  "id": "q43",
+  "type": "semantic",
+  "text": "检索那一步明明召回了，最后答案还是不对，问题可能出在哪一环？",
+  "gold": [
+   "rag-total-0057",
+   "rag-total-0113"
+  ],
+  "arms": {
+   "single": {
+    "final": "「召回到了、答案还是不对」说明失败点已经不在检索的召回环节，而在召回之后。按 wiki 里的排查口径，证据链上有四层可能出问题，建议按下面的顺序逐层验证（顺序不能反，否则只会在提示词上反复调，真正的问题却在切分或组装）。\n\n## 一、先确认“召回到”是真的召回到\n这个前提值得复核，因为三件事都会让人误以为召回到了，但从模型视角看其实没有：\n- **是否越过越权/权限过滤**：多库隔离用元数据字段时，“一条漏过滤就一条越权”，但也可能反过来说——过滤条件写错会把正确块挡掉。先按元数据先过滤再检索核对。\n- **新旧版本同时在库**：只用“只加不删/只重灌不删”的增量更新，旧版条款和新版一起被召回，模型可能拿到过期条款，答案“看起来有依据但错”。这是自查时最容易确认、也最容易出问题的一项。\n- **重排把对的那条挤出 Top-K**：粗排有几十条候选，精排后只进 prompt 3~8 条；重排模型 token 上限只有 512 时，长块会被截断，真正答案块被切掉。要看**重排后最终进上下文的块**，而不是粗排候选。\n\n## 二、重排/精排层：召回有但排序错\n“召回没捞到的，重排救不回”这句话反过来不成立：**捞到了、排序错，同样会丢答案**。粗排是一维的（query 与文档各压成一个向量，只判断像不像），精排是二维的（token 级交互，判断条件是否成立）。如果跳过 Rerank，或者 Rerank 超时被降级为“直接用粗排结果”，而答案块排在 10 名以后，就会被 3~8 条的截断线切断。可以查 trace，看目标块在精排前后的名次变化。\n\n## 三、组装层：证据被挤出上下文\n这是最容易被忽略的一层，共有四个可能：\n- **预算分配超标**：片段应不超过上下文的一半、历史不超过四分之一。历史较长时如果没做压缩，注入块会被挤掉或截断。\n- **位置问题**：长上下文有 U 型注意力谷底（首尾强、中间弱）；高分块如果全被放在中间区域，模型仍可能读不到。\n- **多样性去重（MMR）过度**：在相关的前提下压缩重复时，可能把唯一正确的那条当成弱信号去掉。\n- **块本身缺上下文**：表格被切断、每行没重复表头、块里只有数据没有表名和列名，人看着知道它在讲什么，模型看着却不知道；也属于“召回到了但用不上”。\n\n## 四、生成层：有证据但没用证据\n- **提示词缺少约束**：没有“只依据资料 / 没有就说没有 / 每句标编号”，模型会自由发挥；反过来，规约太紧又会导致大量拒答。\n- **资料里存在相似但错误的内容**：这属于“答案有编造”的典型症状；模型并没有无视资料，而是选了错的那条。\n- **引用不存在的编号**：这是幻觉的一种形式，可以靠规则匹配自动查出来。\n- **多轮场景下“它”指代歧义**：多轮失效的原因不在检索算法，而在查询本身脱离上下文就歧义；必须先改写为独立查询。\n\n## 五、35 分钟可执行的定位流程\n1. 拉出这次请求的 trace，确认**最终进 prompt 的块**里有没有目标证据块。（如果没有，说明问题在检索或重排阶段，不在生成阶段。）\n2. 如果有证据块但答案仍不对，就逐条查 Faithfulness：把回答拆成独立陈述，逐条判断“能否只从给定资料推出”，定位到底是哪一条陈述脱离了资料。\n3. 如果 Faithfulness 没问题、但内容错了，就检查库里是否有同事实的两个版本（前后矛盾症状）。\n4. 只有以上都干净，才去调提示词。\n\n另外有两个横切手段能避免瞎猜：一是**分两段评估**（检索段看 Recall / Context Precision，生成段看 Faithfulness / Answer Relevancy），否则永远定位不到是“没找到”还是“没用上”；二是**四条监控曲线同看**——命中率正常但拒答率上涨，说明召回没问题、是提示词或阈值改坏了；命中率下跌且拒答率上涨，才是召回坏了。\n\n依据：[[concept/rag-production]]、[[concept/rag-pipeline]]、[[concept/hybrid-retrieval]]、[[answers/answer-rag-eval-metrics]]",
+    "usage": {
+     "prompt_tokens": 23750,
+     "completion_tokens": 1209,
+     "total_tokens": 24959
+    },
+    "elapsed_ms": 12707.837581634521,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-rag-eval-metrics.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-rag-eval-metrics.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: RAG 评估方案中哪些指标要标准答案、哪些可免人工\\ntype: concept\\nsources: [raw/rag-total.md, raw/kb-rag.md]\\nupdated: 2026-1"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案围绕“召回之后哪一环出问题”展开，覆盖了重排挤出、组装预算/位置/切块、生成未用证据等核心排查点，且与参考资料强调的排查顺序一致，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1268,
+     "completion_tokens": 62,
+     "total_tokens": 1330
+    }
+   }
+  }
+ },
+ {
+  "id": "q44",
+  "type": "semantic",
+  "text": "长对话聊到后面上下文塞不下了，早期的信息怎么压损失最小？",
+  "gold": [
+   "rag-total-0069",
+   "rag-total-0068"
+  ],
+  "arms": {
+   "single": {
+    "final": "**结论：压历史的目标不是「压得短」，而是「先明确剩下什么必须保留」。** 优先级从高到低是：已确认事实、约束和参数 > 当前目标 > 已排除选项 > 背景铺垫。压缩历史时，应当先删掉背景叙述，再删掉过程性试探，最后才动参数与结论。如果反过来先删参数、先删原文细节，后续回答就会「看起来连贯、实际答错」。\n\n以下是 wiki 中能够直接支撑这一结论的几条要点：\n\n**1. 预算分配有明确比例，不是随意削减**\n上下文组装阶段的经验比例是：注入的检索片段 ≤ 一半预算，对话历史 ≤ 四分之一，其余留给指令与输出。只有逼近上限时才压缩历史，而且顺序是**先压历史 → 再压片段 → 最后才动指令**。指令是最后一道防线，压缩指令会导致回答格式和「没有就说没有」这类规则失效。\n\n**2. 状态只记三样，其余都是可弃内容**\n多轮对话压缩时的工程做法是维护一个显式对话状态，只存：**已确认事实、当前目标、已排除选项**。超过五轮就开始压缩，压缩时「优先压背景、保已确认参数」。这三样正是损失最大的区域，因为一旦丢掉，模型会重复提问或用过期参数继续执行。\n\n**3. 早期信息丢失的真正来源不是「被压缩」，而是「指代歧义」**\n多轮对话失效的原因不在检索算法，而在「它、那个、上面说的」这类指代脱离上下文后会产生歧义。因此，工程默认做法不是把历史原文整段拼进查询（会让噪声变多），而是**先把本轮问题改写成独立可检索的查询**（多一次模型调用），历史只作为改写输入。这样即使历史被大幅压缩，只要判据和参数被结构化保留，检索与作答质量就不受影响。\n\n**4. 如果历史里有原文级别的细节（数字、条款、引用），不要用摘要替代**\n向量化本身有损这一特性值得警惕：数字、人名、条件在压缩时容易丢失，所以索引必须同时存原文与向量。同理，对话中的**原文级细节应当在压缩时原样保留成条目，用摘要替代会失真**——摘要适合「说了什么方向」，不适合「那个数值是多少」。\n\n**5. 压缩产物要能被检索到，而不是只塞在窗口里**\n与其把压缩摘要当成一段更短的文本塞回去，更稳的做法是把它写成结构化外部记忆（事实表、槽位、清单），需要时按需取用。这正是 LLM-Wiki 的思路：理解在写入时做完，产物是页面而不是一次性上下文；对长对话来说，就是把已确认事实写入外部页面，靠目录或标签定位，而不是让整个历史占用上下文窗口。需要注意的是，它的失败模式之一就是「编译会失真」（盲编译灾难性失败率 53%–60%），因此压缩过程要带对照或自检，不能全自动写入。\n\n**6. 可以一起采用的保底方案：把关键早期信息保留在首尾**\n长上下文存在 U 型注意力效应，中间位置最容易被忽略。所以，如果必须保留少量早期原文，应把它放在**开头或结尾**，不要埋在历史中段；这也是片段排序的既有实践。\n\n**实操建议（组合使用）**：超过五轮后，把历史转成「事实/目标/已排除」三栏状态表 + 一份只保留结论的压缩叙事；原文级细节单独存成可检索条目；每轮查询先改写成独立查询再检索；压缩时自检一遍关键参数有没有丢。这样，损失的通常只是「当时怎么讨论的」这类过程信息，而不是「结论是什么」。\n\n依据：[[concept/rag-pipeline]]、[[entity/llm-wiki]]、[[entity/vector-rag]]、[[concept/checkpoint-recovery]]（状态快照与「只记关键状态」的类比）、[[source/rag-total]]",
+    "usage": {
+     "prompt_tokens": 33371,
+     "completion_tokens": 1151,
+     "total_tokens": 34522
+    },
+    "elapsed_ms": 13348.04916381836,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       },
+       "search_wiki": {
+        "query": "上下文",
+        "limit": "10"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1",
+       "search_wiki": "OBSERVE {\"hits\": [\"answers/answer-multi-kb-isolation.md:14 — 关键在于顺序不可反。让向量库先做 top-K 再在应用层筛掉无权限的块，等于把高权限内容读进了服务进程；更糟的是模型可能已经从上下文里看到了它。过滤必须作为检索请求的一部分下发，在候选集生成之前生效。^[raw/rag-total.md]\", \"answers/answer-r"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "limit": "10",
+        "query": "压缩"
+       },
+       "read_page": {
+        "path": "concept/checkpoint-recovery.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:59 — 向量库见 [[entity/chroma]]（轻量）与 [[entity/qdrant]]、Milvus（分布式、GPU、生产可用，代价是 etcd/MinIO/Pulsar 运维重）。七个库的判断顺序：先看规模，再看要不要自己运维，最后看\", \"concept/rag-pipeline.md:79 —",
+       "read_page": "OBSERVE {\"path\": \"concept/checkpoint-recovery.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: 检查点与断点恢复：super-step、durability 与四类「停下」\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-0"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "search_wiki",
+       "read_page"
+      ],
+      "args": {
+       "search_wiki": {
+        "limit": "10",
+        "query": "五轮"
+       },
+       "read_page": {
+        "path": "entity/llm-wiki.md"
+       }
+      },
+      "observe": {
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:81 — 多轮失效的原因不在检索算法，而在「它」脱离上下文本身歧义。三条做法：历史拼进查询（噪声变多）、**先改写独立查询（工程默认，多一次模型调用）**、对话状态加槽位。状态记三样：已确认事实、当前目标、已排除选项。超过五轮就压，优先压背景、保已确\", \"source/rag-total.md:48 — 组装四",
+       "read_page": "OBSERVE {\"path\": \"entity/llm-wiki.md\", \"lines\": \"1-33/33\", \"content\": \"---\\ntitle: LLM-Wiki\\ntype: entity\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-11\\nsummary: 理解全在入库时做完、产物是页面而非索引的知识组织形"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案覆盖了参考资料的核心要点（压下背景保参数、三样关键状态、五轮触发、原文细节不摘要、外部结构化记忆等），并补充了预算比例、指代改写、U型注意力等内容，虽超出原文但无实质错误或编造痕迹。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1091,
+     "completion_tokens": 69,
+     "total_tokens": 1160
+    }
+   }
+  }
+ },
+ {
+  "id": "q45",
+  "type": "semantic",
+  "text": "任务中途失败重启后不想从头再跑，又怕外部系统被重复写入",
+  "gold": [
+   "flow-control-0029",
+   "flow-control-0024"
+  ],
+  "arms": {
+   "single": {
+    "final": "## 结论先说\n\n要同时满足这两个诉求，需要用**检查点（从哪继续）+ 幂等（外部写入只发生一次）**两者配合；只靠其中任何一个都不够。检查点负责让任务不必从头再跑；幂等负责即使重跑，也不会对外部系统重复写。\n\n## 一、不从头重跑：检查点的三个关键设置\n\n1. **保存检查点并固定 `thread_id`**：检查点默认不会开启，必须通过 `compile(checkpointer=...)` 显式启用；否则 `interrupt()` 没有地方持久化，恢复和记忆都会失效。`thread_id` 是检查点的主键，复用它就能续接同一条执行线。\n2. **关键在于 super-step 粒度，不必细到节点**：一个 super-step 是图的一次 tick，这一步里被调度的节点全部跑完后，才写入一份完整快照；并行节点在同一步里只产出一份快照。此外还有 **pending writes**：节点执行完会先把写入写到 task 级，所以如果同一步里 A 成功、B 失败，恢复时 A 不会重跑，只补 B。也就是说，“检查点之间崩了全丢”是误解，实际丢的只是失败节点自己那部分。\n3. **durability 设成 `sync`**：`exit` 只在退出时写入，如果进程被硬杀，中间状态会全部丢失；`async`（默认）虽然会保存快照，但可能丢失最近一步；**如果涉及资金、库存或不可重放的外部调用，就应该用 `sync`**，在下一步开始前同步写完。\n\n存储选择按场景定档：本机验证用 SqliteSaver，足以跑通检查点、interrupt 和恢复；生产环境需要多个执行进程共享同一份存储，所以应使用 PostgresSaver。存储选型本身不解决“恰好一次”的问题。\n\n## 二、不重复写入外部系统：幂等\n\n重试和恢复都会让同一段逻辑执行两次，而检查点只保证“知道从哪继续”，不保证“副作用只发生一次”。如果外部写是发通知、发报告、扣款这类操作，就必须补上幂等层：\n\n| 做法 | 机制 | 适合 |\n|---|---|---|\n| 幂等键 | 每次请求带唯一键，下游按键去重 | 调外部写接口（最通用） |\n| 先查后写 | 存在则跳过 | 有天然业务唯一键 |\n| 状态机 | 只允许从某态迁到某态，重复执行无副作用 | 长流程 |\n\n**执行顺序原则**：高风险动作（扣款、发布、发消息）放在一次确认或检查点**之后**，低风险查询放在**之前**。查询重跑一次没有危害，扣款重跑一次就是事故。\n\n## 三、还有两处容易出错的地方\n\n- **异常不等于等人**：中途报错默认不会自动转为人工处理；未捕获的异常会冒泡终止，状态停在上一份检查点，下次从那里重跑失败那一步。只有代码里显式写 `interrupt()` 的预设断点，才是真正停下来等人。\n- **停机方式决定能否续跑**：硬杀（`kill -9`）来不及写任何东西；协作式 drain（`RunControl()` + `request_drain()`，跑完当前 super-step 后写检查点再抛 `GraphDrained`）才是面向滚动发布和 SIGTERM 的有序停止路径。\n- **只对瞬时故障重试**：网络抖动、429、超时值得退避重试；参数非法、鉴权失败、工具选错重试只会放大延迟与账单。\n\n## 四、参考实测数据\n\nD11 断点恢复对照实验（2026-11-13）显示：基线没有检查点，一旦恢复，整条链重跑，固定 5 步；增强版使用 SqliteSaver + `durability=sync` + 幂等注册表后，crash 场景重做 2 步、write_fail 1 步、raise 3 步，**重复副作用全部为 0**（基线 crash 场景为 1 次，报告被发布两次），并在幂等注册表留下 `dup_blocks` 记录，做到“dup=0 且有据可查”。崩溃场景耗时反而更短（3891ms vs 4144ms），因为少重做了步骤。**失效条件**：单步任务，或可以整体重跑且没有副作用的场景，这套投入的收益接近于零。\n\n## 五、上线前可执行的检查清单\n\n1. `compile(checkpointer=PostgresSaver(...))`，`thread_id` 由业务唯一标记生成，并在恢复时复用。\n2. 对写外部系统的动作设 `durability=\"sync\"`，并逐个检查是否幂等（加幂等键或先查后写）。\n3. 把高风险副作用挪到确认点或检查点之后。\n4. 演练四个注入点：节点执行到一半杀进程、外部写接口超时、换进程恢复、连续失败触发熔断；查看三个指标：恢复成功率、重做步骤数、**重复副作用次数（最容易漏测，也是唯一造成真实损失的一项）**。\n\n依据：[[concept/checkpoint-recovery]]、[[concept/idempotency]]、[[concept/agent-reliability]]、[[answers/answer-sqlitesaver-scenarios]]",
+    "usage": {
+     "prompt_tokens": 18037,
+     "completion_tokens": 1361,
+     "total_tokens": 19398
+    },
+    "elapsed_ms": 11698.18925857544,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/idempotency.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/idempotency.md\", \"lines\": \"1-30/30\", \"content\": \"---\\ntitle: 幂等：重试与恢复的前提\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-09\\nsummary: 超时重试与节点重入都会让同一逻辑执行两次；幂等"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-sqlitesaver-scenarios.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-sqlitesaver-scenarios.md\", \"lines\": \"1-37/37\", \"content\": \"---\\ntitle: SqliteSaver 用在什么场景：单机验证档的检查点存储\\ntype: concept\\nsources: [raw/flow-control.md]\\nupdated: 2026-11-"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心要点（task 级写入使恢复只补失败节点、检查点与幂等需配合防止重复写入），并在此基础上做了合理的工程扩展，没有实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1423,
+     "completion_tokens": 55,
+     "total_tokens": 1478
+    }
+   }
+  }
+ },
+ {
+  "id": "q46",
+  "type": "semantic",
+  "text": "召回出来的几段内容说的是同一件事，塞进上下文只会浪费篇幅",
+  "gold": [
+   "rag-total-0060"
+  ],
+  "arms": {
+   "single": {
+    "final": "你说的这个痛点成立，但结论要分两步：**去重的正确位置在“融合之后、进 prompt 之前”**，而不是靠调 recall 数量或让模型自己去重；另外“同一件事”有两类，分别要不同的手段处理。\n\n## 一、先分清是哪一类重复\n\n| 类型 | 表现 | 该用什么 |\n|---|---|---|\n| **字面/近似重复**：同一段事实的多个版本、同一段落的相邻块重叠、中英双份 | 两三个块内容几乎一样，或 overlap 区内容相同 | 相似度去重（MMR / 相似度阈值聚类）|\n| **语义冗余**：句子不同但结论重复、多个块都在说同一条件的背景 | 措辞不一样但信息量重叠 | MMR 的多样性项或信息增益筛选 |\n| **答案层次不同但都“相关”** | 一个块给结论、一个块给背景 | **不算冗余**，别删；结论块优先给靠前位置 |\n\n前两类是你要消掉的，第三类删掉反而伤害答案完整性。^[raw/rag-total.md]\n\n## 二、可用的三档手段（按代价从低到高）\n\n1. **切分侧先减少重复**：overlap 从“半块”降到 10–20%（50–100 token 就够），半块重叠会让索引体积翻倍、并在召回时制造近乎同文的邻居块。同时保证**只加不删是最常见错误**——同一事实两个版本一起被召回，模型可能拿到过期条款，这类“重复”必须在入库侧按文档 ID 定点替换或走 collection 版本化解决，组装端去重是兜底的。^[raw/rag-total.md]\n2. **组装侧 MMR**：`lam=0.5` 是在“保相关”前提下压重复的起点值，属于上下文组装四件事（位置、体积、编号、多样性）之一；LangChain 侧可用 `fetch_k` + `lambda_mult` 实现（Chroma 自带）。^[raw/rag-total.md]^[entity/chroma.md]\n3. **两段式 K 的收敛**：粗排放大召回（top-50 起）+ 精排收敛到进 prompt 的 3~8 条。**K 大不只是浪费篇幅，还会稀释注意力、拉高成本**；但注意“有 Rerank 才能放大 K，没有则放大会直接掉准确率”。所以这里不是把 K 调小就完事——正确顺序是：放大召回 → 重排把真正对的排上来 → 再用 MMR/去重把剩下的同质块砍掉。^[raw/kb-rag.md]\n4. **必要时再上上下文压缩**（LLM 摘要块内容）——但它会丢细节，属于“最后手段”，排在去重之后。^[raw/rag-total.md]\n\n## 三、几个容易踩的坑\n\n- **别用“检索后过滤”当去重位**：先按元数据过滤再检索，比检索后过滤省一个数量级。同理，能靠文档 ID/版本元数据在检索阶段就排除的重复（旧版本块），不要留到组装端再算。^[raw/rag-total.md]\n- **RRF 会把弱路尾部噪声一起带进来**：融合本身可能加剧“多路重复”，所以去重要放在 RRF 之后，不能只对单路结果做。^[raw/kb-rag.md]\n- **排查顺序不能反**：先看检索有没有捞到证据，再看生成有没有用证据，最后看组装有没有把证据挤掉。如果你怀疑是“组装把证据挤掉了”，说明前两步是好的，这时才动 MMR/压缩。^[raw/rag-total.md]\n- **去重指标要落到监控上**：“说资料不足但其实有”和“答案有编造”是两类相反症状；去重砍过头会推向拒答率上升。四条曲线（命中率、拒答率、首字延迟、token 消耗）必须同看，砍完重复后命中率不变而拒答率上涨，说明砍到了“答案层次不同”的第三类块。^[raw/rag-total.md]\n\n## 四、一句话口径\n\n> 重复不该在“召回”这一层解决（那里要的是召回率），该在“组装”这一层用 MMR + 版本化去重解决；而根本解法是入库侧不留同事实多版本 + overlap 别开太大，组装端去重只是兜底。\n\n依据：[[concept/rag-pipeline]]、[[concept/hybrid-retrieval]]、[[concept/rag-production]]",
+    "usage": {
+     "prompt_tokens": 23003,
+     "completion_tokens": 1205,
+     "total_tokens": 24208
+    },
+    "elapsed_ms": 11634.896516799927,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {
+        "args": "{}"
+       }
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/hybrid-retrieval.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/hybrid-retrieval.md\", \"lines\": \"1-52/52\", \"content\": \"---\\ntitle: 混合检索与重排：两路召回、RRF 融合、交叉编码器精排\\ntype: concept\\nsources: [raw/kb-rag.md, raw/qdrant.md]\\nupdated: 2026-02-14\\nsu"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-production.md"
+       },
+       "search_wiki": {
+        "query": "MMR"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-production.md\", \"lines\": \"1-74/74\", \"content\": \"---\\ntitle: RAG 生产化：部署、降级、监控、安全与排查顺序\\ntype: concept\\nsources: [raw/rag-total.md]\\nupdated: 2026-11-13\\nsummary: 索引与查询分离、四条",
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/rag-pipeline.md:75 — 组装四件事：排序位置（长上下文有 U 型注意力谷底，高分块交替放首尾）、体积控制、来源编号（每段带编号与出处）、多样性去重（MMR，lam=0.5 在保相关前提下压重复）。^[raw/rag-total.md]\", \"entity/chroma.md:34 — LangChain：`Chroma.fro"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 1,
+      "reason": "答案详细讨论了去重与MMR，但没有针对参考资料中给出的MMR函数实现（lam参数语义、迭代选块逻辑、返回picked列表）进行覆盖或校验，属于明显遗漏核心代码要点，仅部分覆盖。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1252,
+     "completion_tokens": 60,
+     "total_tokens": 1312
+    }
+   }
+  }
+ },
+ {
+  "id": "q47",
+  "type": "semantic",
+  "text": "粗排给的排序看着合理，但真正对的证据排在很后面，下一步干什么？",
+  "gold": [
+   "rag-total-0052",
+   "rag-total-0053"
+  ],
+  "arms": {
+   "single": {
+    "final": "## 结论：这属于「排序问题」，不属于「召回问题」，所以下一步做**精排（交叉编码器 Rerank）**，并用 Top-K 两段式让粗排多放一些候选进来\n\n你描述的症状很关键：**正确证据在候选集合里，只是排名靠后**。这说明粗排的召回已经拿到了它，问题出在打分器上。因此要改的是排序层，不要增加检索路径，也不要更换 Embedding、切分或向量库——换这些等于重新走一遍召回，此时即使精排再好，也救不回「没被粗排捞进来的」证据。\n\n### 为什么粗排会这样\n\n粗排是**一维**的：query 和 doc 各压成一个向量，只比较一条轴上的距离，两边没有 token 级交互；就算把向量维度拉高，也只是把同一条轴拉长，不会让「这个条件成不成立」变得可判。精排是**二维**的：query 与文档拼成一条序列进同一模型，token 之间互相 attend，比的是关系不是距离——**一维只能判断「像不像」，二维才能判断「对」**。你遇到的「看着合理但实际不对」正是「像」而不「对」的典型表现（同主题、同措辞风格但条件不成立）。\n\n### 具体动作\n\n1. **两段式放 K**：粗排先把候选放大到 top-50 起步，精排再收敛到进 prompt 的 3~8 条。**有 Rerank 才能放大 K；没有 Rerank 时放大 K 会直接掉准确率**（噪声稀释注意力、成本上升）。这一步和 Rerank 必须一起上。\n2. **重排实现三选一**：不做（排名噪声原样进 prompt，等于你现在的状态）；云 API（省事，但候选数有上限，且依赖网络）；本地 BGE（可控，但要 GPU）。bge-reranker-v2-m3 上限 8192 token 但**推荐训练长度 1024**，更早的 base/large 是 512——候选块超过这个长度会先被截断，截断处正是命中的条件所在时，精排也救不回。\n3. **候选数超过重排上限就先截断**；同时注意重排延时会从几毫秒变成百毫秒级，因此需要降级路径：**重排超时就跳过精排，直接用粗排结果**，不要让一个超时打断整条链路。\n4. **如果证据是精确串（编号、型号、条款号、黑话）**，只加 Rerank 不够，还得补 BM25 一路 + RRF 融合，用 RRF 绕开两路分数量纲差异；RRF 的 k 不是准确率旋钮，只影响名次衰减速度（k=60 为社区经验值）。中文要补专有词词典，否则 BM25 对业务黑话基本无效。\n5. **粗排 + 精排都调完仍不够**，才轮到更重的路线：多跳问题单条打分本就不够，要靠查询拆分或图检索（[[entity/graphrag]]）；也可以考虑 late interaction（ColBERT 路子，token 级向量 + 查询时 MaxSim，准度近精排、成本近粗排）。\n\n### 别走错的三步\n\n- **不要先调提示词**。排查顺序不可反：先看检索有没有捞到证据 → 再看生成有没有用证据 → 最后看组装有没有把证据挤掉。你已经定位到「捞到了但排后」，所以范围锁在第二段。\n- **不要只加 rerank 而不验收**：先抽 20 对「问题—应命中片段」测 Top-5 命中率，召回率不达标就说明问题其实在解析/切分/Embedding，不是排序——「召回没捞到的，重排救不回」。\n- **注意分块把表格切断的情况**，这种两路都救不回来；以及同一事实在库里有新旧两版时，精排会稳定地把旧版也一起排上来（只加不删是最常见错误）。\n\n一句话：**先把粗排候选放大，再叠一层交叉编码器精排，配好截断上限和超时降级，然后才谈换检索范式。**\n\n依据：[[concept/hybrid-retrieval]]、[[concept/rag-pipeline]]、[[concept/rag-production]]、[[answers/answer-rag-eval-metrics]]",
+    "usage": {
+     "prompt_tokens": 23769,
+     "completion_tokens": 1165,
+     "total_tokens": 24934
+    },
+    "elapsed_ms": 11862.174272537231,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-rag-eval-metrics.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-rag-eval-metrics.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: RAG 评估方案中哪些指标要标准答案、哪些可免人工\\ntype: concept\\nsources: [raw/rag-total.md, raw/kb-rag.md]\\nupdated: 2026-1"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心要点，即粗排一维只能判断像不像、精排二维才能判断对不对，指出问题在排序层并给出上精排交叉编码器、放大Top-K候选等具体动作，无实质性错误或编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1305,
+     "completion_tokens": 65,
+     "total_tokens": 1370
+    }
+   }
+  }
+ },
+ {
+  "id": "q48",
+  "type": "semantic",
+  "text": "切块时丢掉的主语信息，检索期再怎么调权重也补不回来",
+  "gold": [
+   "rag-total-0094",
+   "retrieval-paradigm-0004"
+  ],
+  "arms": {
+   "single": {
+    "final": "这句话方向对，但要限定——它在**特定失效模式**上成立，不是通用真理。分三段说。\n\n## 一、这句话在讲什么：切块丢掉的是「块自己是谁」\n\n切块是纯局部的动作：一段文字被切出来的那一刻，就和「它出自哪份文档、哪一章、在讲谁」断开了。向量只编码块内文字，不编码位置。这类信息一旦丢失，**查询期的一切手段都无从恢复**，因为它们全都只能在这批已经入库的候选里挑、算、加权：\n\n- **调权重 / 调 ef 参数 / 换相似度度量**：只是在同一批向量上改排序偏好，块里没有的信息不会因为权重变大而长出来。\n- **Rerank（交叉编码器）**：只能在已召回的候选里精排——而候选本身可能就是错的，甚至正确的块压根没进候选池。「召回没捞到的，重排救不回」。\n- **换 Embedding 模型**：能拉近问法与原文的措辞差距，但块内没有主语这件事不是模型表达能力的问题，是输入信息缺失。库页也明确写了判断顺序：Top-5 命中率低于六成，先怀疑 Embedding **再怀疑切分**——切分在更上游。\n\n这正是 [[concept/rag-pipeline]] 里那条总纲的具体化：**解析与分块决定检索上限，重排只能在已入库候选里挑；把力气花在换 Embedding 上、解析把表格切碎，换模型也没用。**\n\n## 二、标准解法：把理解提前到索引期（Contextual Retrieval）\n\nAnthropic 的 Contextualual 做法就是把这一格补回来——不改检索机制，只在索引时给每块补 50–100 token 的位置说明（文档叫什么、属于哪一章、这段在讲谁），即官方原话的「补的是块自己是谁——这是切块时丢掉、检索期调权重也补不回来的信息」。^[entity/contextual-retrieval.md]\n\n三做法可叠加，叠得越深降幅越大（top-20 失败率）：\n\n| 配置 | 失败率 | 累计降幅 |\n|---|---|---|\n| 基线 | 5.7% | — |\n| + 上下文嵌入 | 3.7% | 35% |\n| + 上下文 BM25 | 2.9% | 49% |\n| + rerank | 1.9% | 67% |\n\n注意两点：报 1.9% 必须说明是三者齐上；成本 $1.02/百万 document token，且必须靠 prompt caching 才成立；官方只测英文，中文要重测。\n\n注意这张表本身就说明了「索引期补 + 查询期调」是互补而非对立——最后那一步 2.9%→1.9% 恰恰是查询期的 rerank 贡献的。**索引期补上候选的正确性，查询期才有排序可调。**\n\n## 三、三条必须加的限定（否则这句话会被说错）\n\n1. **只有「块内缺失」类的信息补不回来。** 如果块本身信息完整、问题就是单跳事实，Contextual Retrieval 几乎无增量。切分问题也分层：块太碎/无 overlap/表格被切断/块内不带元数据——这些是切分侧能修的；而「答案散在相隔几十页的多章节」「跨文档追关系」「全局主题是什么」根本不是切块丢的，是**检索单元选错了**，改权重和补位置说明都治不了，得换形态（文档树导航 / GraphRAG / LightRAG）。\n2. **索引期补得越多，错得越固化。** 这是「理解时点」这一轴的根本代价：每往写入端移一格，查询便宜一分、错误固化一分、语料变更后重建成本涨一分。写错的位置说明会把错误烧进索引，比没有更糟。\n3. **切分侧的几个「更便宜的解」常被跳过**：块内元数据写来源/页码/章节路径（引用溯源与元数据过滤都靠它）、父子文档 Small-to-Big（小块检索求准、大块生成求全）、按结构切分（能说出「出自第三章第二节」）。这些是不花钱的「主语补全」，优先级在 Contextual Retrieval 之前。\n\n**结论口径**：切块丢掉的主语，检索期确实补不回来——所以要补在索引期（位置说明、块内元数据、上下文 BM25），查询期只负责在此之上把「像」变「对」。但先分清丢的是「主语」还是「检索单元」：前者靠 [[entity/contextual-retrieval.md]] 之外的索引期补丁，后者只能换检索形态。\n\n是否需要我把这段综合成 `answers/` 页留存？\n\n依据：[[entity/contextual-retrieval.md]]、[[concept/retrieval-paradigm.md]]、[[entity/vector-rag.md]]、[[concept/rag-pipeline.md]]",
+    "usage": {
+     "prompt_tokens": 21613,
+     "completion_tokens": 1260,
+     "total_tokens": 22873
+    },
+    "elapsed_ms": 11926.924228668213,
+    "steps": 4,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "entity/contextual-retrieval.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"entity/contextual-retrieval.md\", \"lines\": \"1-26/26\", \"content\": \"---\\ntitle: Contextual Retrieval（上下文检索）\\ntype: entity\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-11\\nsum"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"1-89/89\", \"content\": \"---\\ntitle: RAG 全链路：解析、切分、Embedding、检索、引用五段取舍\\ntype: concept\\nsources: [raw/kb-rag.md, raw/rag-total.md]\\nupdated: 2026-11-1"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料的核心机制（切块丢失主语信息、索引期无法补回、Contextual Retrieval的50-100 token位置说明、三做法叠加的失败率数据、成本与prompt caching限制），没有编造或实质性错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1759,
+     "completion_tokens": 65,
+     "total_tokens": 1824
+    }
+   }
+  }
+ },
+ {
+  "id": "q49",
+  "type": "semantic",
+  "text": "新数据进来老的社区摘要整批作废，图谱类方案的更新成本怎么降？",
+  "gold": [
+   "rag-total-0096",
+   "retrieval-paradigm-0008"
+  ],
+  "arms": {
+   "single": {
+    "final": "## 结论\n\n你问的「新数据进来、老的社区摘要整批作废」正是 [[entity/graphrag]] 结构上的固有缺陷——社区划分一变动，旧摘要就无法继续使用。要降低成本，有四个层次的做法，按性价比从高到低排列：\n\n### 1. 更换增量更新的方案：用 LightRAG 的节点与边并集，不做重建\n[[entity/lightrag]] 针对的就是 GraphRAG 的这个问题：新抽取的节点集、边集与旧集合取并集，属于 INSERT 操作，而不是重建。**但不要把「首建便宜」当作它的优点**：它同样逐块抽取实体，首建量级与 GraphRAG 抽取阶段相当；省钱主要发生在后续每次数据更新时，不必整批重写摘要（同规模下，GraphRAG 式整体重建约 1,399 万 token，即 1,399 个社区 × 2 遍 × 约 5,000 token；LightRAG 检索 <100 token/次）。代价是图会越来越稠，需要定期合并剪枝，宏观结论也随查询关键词漂移。另外，它对 GraphRAG 的胜率只是打平甚至持平（54.8/52.0/52.8/**49.6**），因此不要指望它“全面超越”。真正把索引成本降到接近零的是 LazyGraphRAG，但它还没有进入开源库。\n\n### 2. 限制 GraphRAG 的使用范围：只把它当方法论，不把它当成基础设施\n按 [[concept/retrieval-selection]] 的三步判定：先数页数，再看问题形态。图类方案只在两种情况下值得使用：**知识库 ≥500 页**，并且**问题属于“这批材料的主题是什么”这类全局归纳**（单跳事实查询，论文自己承认向量 RAG 更强）。因此降低更新成本的最直接办法是缩小图的适用范围：只对稳定的核心语料建图（制度、规范、已定稿文档），把日常持续变化的内容留在向量 RAG 侧，不进入图。图是静态资产的特性反过来成了优点，重建频率自然下降。\n\n### 3. 拆分重建粒度，按社区或文档子树做局部失效\n不要做整库重新处理：为每份文档保留稳定的 doc_id，并记录它贡献的实体、边和社区归属；新数据进来时只重写受影响社区（社区划分可用增量聚类，或对少数社区重新聚类），其余摘要直接沿用。这和 [[concept/rag-pipeline]] 里向量库的增量更新三法是同一个思路——**按文档 ID 定点替换、collection 版本化可回滚，只加不删是最常见错误**：新旧两版会被一起召回，模型会拿到过期结论。图这边也一样：过期社区摘要必须显式失效，不能靠“新摘要覆盖旧摘要”蒙混过去。\n\n### 4. 降低写入端理解的成本（治本）\n你要更新贵的根源是“理解全部前置到写入端”。三种做法：\n- 把图上的宏观能力改为查询时计算：GraphRAG 的社区摘要相当于物化视图，也可以只物化高频社区，冷门社区在查询时临时归纳（LightRAG 就靠双路打图把宏观能力移到查询端，代价是结论随关键词漂移）；\n- **先用 Wiki 反哺**：先拿整理过的 Markdown 作为抽取输入，抽出的实体与关系质量明显高于原始 PDF，可以减少重抽与返工——这是融合四条路中见效最快的一条；\n- 对稳定知识做“编译一次、只改受影响页”：[[entity/llm-wiki]] 的增量编译思路适合几百页量级、有负责人的核心知识；这样图只需要挂一层轻量结构，甚至可以不建图。\n\n### 5. 需要一并纳入成本规划的治理成本\n同一条知识在片段、图节点、文档树、Wiki 页各存一份时，源内容或权限一改，四处都要同步失效——这是很多方案停在演示阶段的真实原因。因此选型时要把“失效同步”的成本算进重建预算，而不是只算 token 单价。成本估算的正确做法是：按抽取 token 量乘以模型单价，再乘以**预计重建次数**；图类方案的账几乎全部落在“重建”上，而不是“查询”上。\n\n**一句话总结**：把图的适用范围缩小到静态核心语料，用节点和边的并集做增量更新，按社区或文档粒度做局部失效，并用整理过的 Markdown 作为输入来降低单次重建成本；不要试图通过“再建一遍图”来维持更新。\n\n依据：[[entity/graphrag]]、[[entity/lightrag]]、[[concept/retrieval-paradigm]]、[[concept/retrieval-selection]]、[[concept/rag-pipeline]]",
+    "usage": {
+     "prompt_tokens": 31106,
+     "completion_tokens": 1324,
+     "total_tokens": 32430
+    },
+    "elapsed_ms": 14031.25286102295,
+    "steps": 5,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-paradigm.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-paradigm.md\", \"lines\": \"1-79/79\", \"content\": \"---\\ntitle: 检索范式：理解放在写入端还是查询端\\ntype: concept\\nsources: [raw/retrieval-paradigm.md, raw/rag-total.md]\\nupdated: 2026-11"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": [
+       "read_page",
+       "search_wiki"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/retrieval-selection.md"
+       },
+       "search_wiki": {
+        "query": "增量"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/retrieval-selection.md\", \"lines\": \"1-50/50\", \"content\": \"---\\ntitle: 检索方案选型三步判定与混合治理\\ntype: concept\\nsources: [raw/retrieval-paradigm.md]\\nupdated: 2026-11-12\\nsummary: 先数页数、",
+       "search_wiki": "OBSERVE {\"hits\": [\"concept/hybrid-retrieval.md:44 — - 中文分词不补专有词，BM25 对业务黑话基本无效；语料全是同义改写型问法时，BM25 增量接近零。^[raw/kb-rag.md]\", \"concept/rag-pipeline.md:55 — 增量更新三法：全量重建（大库耗时且期间不可用）、按文档 ID 定点替换（要维护稳定文档 ID）、"
+      }
+     },
+     {
+      "step": 3,
+      "tool_calls": [
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "concept/rag-pipeline.md",
+        "offset": "40",
+        "limit": "40"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"concept/rag-pipeline.md\", \"lines\": \"41-80/89\", \"content\": \"九种策略的定位（详见 [[source/rag-total]]）：固定长度（会在句中断，适合快速验证）；滑动窗口（重叠 10–20% 够用，半块会让索引体积翻倍）；递归字符切分是工程默认（段落→换行→句号→空格逐级降级，成本极低）；语义切分边界最"
+      }
+     },
+     {
+      "step": 4,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案准确覆盖了参考资料核心要点（LightRAG节点/边并集增量、非重建、GraphRAG重建约1399万token、宏观能力来源对比、图增稠需剪枝、胜率49.6%非全面超越），并围绕降本给出合理延伸，无实质性编造错误。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 1664,
+     "completion_tokens": 78,
+     "total_tokens": 1742
+    }
+   }
+  }
+ },
+ {
+  "id": "q50",
+  "type": "semantic",
+  "text": "上线后想持续盯着检索质量有没有退化，盯哪几条曲线？",
+  "gold": [
+   "rag-total-0107"
+  ],
+  "arms": {
+   "single": {
+    "final": "**日常盯 4 条主曲线（必须一起看，不能只看其中一条）**，再配 2 条辅助曲线和 1 套离线回归：\n\n## 一、四条主曲线\n\n| 曲线 | 监控什么 | 退化时通常代表什么 |\n|---|---|---|\n| **检索命中率** | 召回里是否包含应当出现的那一块（有评估集时按 gold set 统计） | 下降代表召回出了问题：解析、切分、Embedding 或索引更新 |\n| **拒答率** | 回答「资料不足」的比例 | 单独看没有意义，必须与命中率一起判断 |\n| **首字延迟（P50/P95）** | 检索、重排、生成三段分别打点 | 变慢时先检查生成阶段，再看重排候选数是否变大 |\n| **单次 token 消耗** | 每次请求的输入和输出 token | 突然暴涨说明上下文组装失控，或者 top_k、重排候选数被悄悄调大 |\n\n**联合读法（关键）**：\n- 命中率下降，并且拒答率上升 → **召回坏了**（解析、切分、Embedding、集合版本切换）\n- 命中率正常，但拒答率上升 → **提示词或阈值被改坏了**，问题不在检索\n\n## 二、两条辅助曲线\n\n- **Context Precision / Relevancy 曲线**（可全自动，不需要标准答案）：判断 top-k 中靠前的结果是否走偏，比有标准答案的命中率更早发现「排序退化」；典型诱因是重排超时后静默降级为粗排。\n- **引用规则命中率**（用规则匹配，可全自动）：统计回答是否带来源、引用编号是否存在、是否合规拒答。这条曲线能顺便抓住组装阶段「证据被挤掉」的问题。\n\n## 三、离线回归：每次改动前后跑同一批\n\n文档、切分参数、Embedding 模型、prompt、阈值任何一项发生变更，都要用同一套评估集跑一遍再上线。评估集从真实提问中抽 20–50 条：常规约 90%，边界（含无答案和歧义）5–10 条，对抗（需要跨段拼接）5–10 条；每条三个字段：问题、应命中的证据来源、标准答案。另外，`Context Recall`、`Faithfulness`、`RAGAs 端到端` 这组只能在发布前用这批 gold 跑，不适合做日常实时曲线。\n\n## 四、配套的两件事\n\n1. **保留 trace**：答案质量被质疑时，要能回查当时召回了哪些块。四条曲线只说明「有问题」，trace 才说明「问题出在哪一块」。\n2. **排障顺序固定**：先看检索有没有捞到证据 → 再看生成有没有使用证据 → 最后看组装有没有把证据挤掉。顺序反了就会在 prompt 上反复调整，而真正的问题在切分。\n\n另外提醒：现在很多退化来自**索引版本切换**（重建中、新旧版并行），因此给曲线打上 `collection 版本` 标签，并按版本对比指标，比看总量曲线更能提前预警。\n\n依据：[[concept/rag-production]]、[[answers/answer-rag-eval-metrics]]",
+    "usage": {
+     "prompt_tokens": 11132,
+     "completion_tokens": 814,
+     "total_tokens": 11946
+    },
+    "elapsed_ms": 8764.95885848999,
+    "steps": 3,
+    "finished": true,
+    "trajectory": [
+     {
+      "step": 0,
+      "tool_calls": [
+       "read_index"
+      ],
+      "args": {
+       "read_index": {}
+      },
+      "observe": {
+       "read_index": "OBSERVE {\"index\": \"# Wiki Index\\n\\n> 由代码从页面 frontmatter 重建，勿手改。\\n\\n## source（6）\\n\\n- [[source/chroma]] Chroma 的定位、核心概念、嵌入系统、CRUD/查询/过滤 API、持久化与部署、框架集成、实战与选型对比的压缩摘要。\\n- [[source/flow-control]] 编排模式、错误分"
+      }
+     },
+     {
+      "step": 1,
+      "tool_calls": [
+       "read_page",
+       "read_page"
+      ],
+      "args": {
+       "read_page": {
+        "path": "answers/answer-rag-eval-metrics.md"
+       }
+      },
+      "observe": {
+       "read_page": "OBSERVE {\"path\": \"answers/answer-rag-eval-metrics.md\", \"lines\": \"1-57/57\", \"content\": \"---\\ntitle: RAG 评估方案中哪些指标要标准答案、哪些可免人工\\ntype: concept\\nsources: [raw/rag-total.md, raw/kb-rag.md]\\nupdated: 2026-1"
+      }
+     },
+     {
+      "step": 2,
+      "tool_calls": []
+     }
+    ],
+    "judge": {
+     "final": {
+      "score": 2,
+      "reason": "答案完整覆盖了参考资料中的四条核心曲线及其联合读法，没有实质错误，辅助内容和补充建议均属合理扩展而非编造。"
+     }
+    },
+    "judge_usage": {
+     "prompt_tokens": 895,
+     "completion_tokens": 41,
+     "total_tokens": 936
+    }
+   }
+  }
+ }
+]

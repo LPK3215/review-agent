@@ -1,0 +1,15 @@
+{
+ "created": "2026-11-15 12:22:05",
+ "model": "deepseek-v4.1-flash",
+ "base_url": "https://bob01425wy-9001.cnb.run/v1",
+ "judge_model": "deepseek-v4.1-flash",
+ "queries": 50,
+ "arms": [
+  "single",
+  "selfcheck",
+  "review"
+ ],
+ "workers": 4,
+ "judge": true,
+ "wiki_pages": 29
+}
